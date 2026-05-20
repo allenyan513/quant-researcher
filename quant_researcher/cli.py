@@ -242,7 +242,7 @@ def universe_list(
 # ---------------------------------------------------------------------------
 
 
-_VALID_SCOPES = ("profile", "quote", "all")
+_VALID_SCOPES = ("profile", "quote", "financials", "ratios", "estimates", "all")
 
 
 @data_app.command("refresh")
@@ -260,17 +260,36 @@ def data_refresh(
         "--lookback-days",
         help="Initial OHLCV window for tickers with no prior data (default 2y).",
     ),
+    periods: str = typer.Option(
+        "annual,quarter",
+        "--periods",
+        help=(
+            "Comma-separated periods for financials / ratios / estimates "
+            "(default: annual,quarter). Drop 'quarter' if your FMP plan doesn't "
+            "include the quarterly variant of those endpoints."
+        ),
+    ),
 ) -> None:
     """Refresh FMP-sourced warehouse tables for the active universe.
 
     `--scope profile`: replace `profiles` rows from FMP `/profile`.
-    `--scope quote`: append new OHLCV bars to `daily_prices` per symbol.
-    `--scope all` runs both, profile first.
+    `--scope quote`: append new OHLCV bars to `daily_prices`.
+    `--scope financials`: ingest income / balance sheet / cash flow (annual +
+    quarterly, `known_at = acceptedDate` per D6).
+    `--scope ratios`: `/ratios` rows per period (`known_at = now`).
+    `--scope estimates`: forward analyst consensus (`session.merge` revises).
+    `--scope all`: runs every scope in the order above.
     """
     from sqlalchemy import select
 
     from quant_researcher.data.fmp import FMPClient
-    from quant_researcher.data.refresh import refresh_profile, refresh_quotes
+    from quant_researcher.data.refresh import (
+        refresh_estimates,
+        refresh_financials,
+        refresh_profile,
+        refresh_quotes,
+        refresh_ratios,
+    )
     from quant_researcher.db import session_factory
     from quant_researcher.models.universe import UniverseMember
 
@@ -286,6 +305,14 @@ def data_refresh(
         _emit(
             Envelope.failure(
                 "missing_fmp_api_key", "FMP_API_KEY is not set (configure it in .env)."
+            )
+        )
+    parsed_periods = tuple(p.strip() for p in periods.split(",") if p.strip())
+    if not parsed_periods or any(p not in ("annual", "quarter") for p in parsed_periods):
+        _emit(
+            Envelope.failure(
+                "invalid_periods",
+                f"--periods must be a comma list of 'annual'|'quarter', got {periods!r}",
             )
         )
 
@@ -328,6 +355,30 @@ def data_refresh(
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
                 }
+            if scope in ("financials", "all"):
+                r = refresh_financials(sess, client, targets, periods=parsed_periods)
+                scopes_out["financials"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                }
+            if scope in ("ratios", "all"):
+                r = refresh_ratios(sess, client, targets, periods=parsed_periods)
+                scopes_out["ratios"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                }
+            if scope in ("estimates", "all"):
+                r = refresh_estimates(sess, client, targets, periods=parsed_periods)
+                scopes_out["estimates"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                }
     except Exception as exc:
         _emit(Envelope.failure("data_refresh_failed", str(exc)))
     else:
@@ -335,6 +386,7 @@ def data_refresh(
             Envelope.success(
                 data={
                     "scope": scope,
+                    "periods": list(parsed_periods),
                     "universe_size": len(targets),
                     "symbols_processed": targets,
                     "scopes": scopes_out,
