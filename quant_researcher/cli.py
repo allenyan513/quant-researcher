@@ -35,6 +35,13 @@ universe_app = typer.Typer(
 )
 app.add_typer(universe_app)
 
+data_app = typer.Typer(
+    name="data",
+    help="Warehouse refresh from FMP (profiles, daily prices).",
+    no_args_is_help=True,
+)
+app.add_typer(data_app)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -173,13 +180,16 @@ def universe_set(
     from quant_researcher.db import session_factory
     from quant_researcher.universe import parse_watchlist_file, replace_universe
 
+    # Pre-flight validation: each `_emit` raises `typer.Exit` (an Exception
+    # subclass), so we keep these checks OUT of the try block — otherwise the
+    # `except Exception` below would catch the Exit and emit a second envelope.
+    if not file.exists():
+        _emit(Envelope.failure("universe_file_missing", f"no such file: {file}"))
+    symbols = parse_watchlist_file(file)
+    if not symbols:
+        _emit(Envelope.failure("universe_file_empty", f"no symbols parsed from {file}"))
+    label = source or file.stem
     try:
-        if not file.exists():
-            _emit(Envelope.failure("universe_file_missing", f"no such file: {file}"))
-        symbols = parse_watchlist_file(file)
-        if not symbols:
-            _emit(Envelope.failure("universe_file_empty", f"no symbols parsed from {file}"))
-        label = source or file.stem
         with session_factory()() as sess, sess.begin():
             result = replace_universe(sess, symbols, source=label)
     except Exception as exc:
@@ -223,6 +233,113 @@ def universe_list(
             Envelope.success(
                 data={"count": len(members), "members": members},
                 data_freshness={"universe": "live"},
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# qr data ...
+# ---------------------------------------------------------------------------
+
+
+_VALID_SCOPES = ("profile", "quote", "all")
+
+
+@data_app.command("refresh")
+def data_refresh(
+    scope: str = typer.Option(
+        "all", "--scope", "-s", help=f"One of: {', '.join(_VALID_SCOPES)}."
+    ),
+    symbols: str | None = typer.Option(
+        None,
+        "--symbols",
+        help="Comma-separated subset of the universe (default: all universe rows).",
+    ),
+    lookback_days: int = typer.Option(
+        730,
+        "--lookback-days",
+        help="Initial OHLCV window for tickers with no prior data (default 2y).",
+    ),
+) -> None:
+    """Refresh FMP-sourced warehouse tables for the active universe.
+
+    `--scope profile`: replace `profiles` rows from FMP `/profile`.
+    `--scope quote`: append new OHLCV bars to `daily_prices` per symbol.
+    `--scope all` runs both, profile first.
+    """
+    from sqlalchemy import select
+
+    from quant_researcher.data.fmp import FMPClient
+    from quant_researcher.data.refresh import refresh_profile, refresh_quotes
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.universe import UniverseMember
+
+    # Pre-flight (kept outside try — `_emit` raises typer.Exit).
+    if scope not in _VALID_SCOPES:
+        _emit(
+            Envelope.failure(
+                "invalid_scope", f"--scope must be one of {_VALID_SCOPES}, got {scope!r}"
+            )
+        )
+    cfg = settings()
+    if not cfg.fmp_api_key:
+        _emit(
+            Envelope.failure(
+                "missing_fmp_api_key", "FMP_API_KEY is not set (configure it in .env)."
+            )
+        )
+
+    # Phase 1 (read-only): resolve target symbols. Connection is pooled so the
+    # extra open is cheap, and keeping the emit outside any try block avoids
+    # the `_emit`-inside-try double-envelope trap.
+    with session_factory()() as sess:
+        if symbols:
+            targets = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            targets = sorted(sess.scalars(select(UniverseMember.symbol)))
+    if not targets:
+        _emit(
+            Envelope.failure(
+                "empty_universe",
+                "no symbols to refresh — run `qr universe set --file …` first.",
+            )
+        )
+
+    # Phase 2 (write): refresh inside a single transaction.
+    try:
+        scopes_out: dict[str, dict] = {}
+        with (
+            session_factory()() as sess,
+            sess.begin(),
+            FMPClient(api_key=cfg.fmp_api_key) as client,
+        ):
+            if scope in ("profile", "all"):
+                r = refresh_profile(sess, client, targets)
+                scopes_out["profile"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                }
+            if scope in ("quote", "all"):
+                r = refresh_quotes(sess, client, targets, lookback_days=lookback_days)
+                scopes_out["quote"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                }
+    except Exception as exc:
+        _emit(Envelope.failure("data_refresh_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "scope": scope,
+                    "universe_size": len(targets),
+                    "symbols_processed": targets,
+                    "scopes": scopes_out,
+                },
+                data_freshness={"fmp": "live"},
             )
         )
 
