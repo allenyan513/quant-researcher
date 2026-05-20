@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.2",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -18,6 +19,7 @@ qr = "quant_researcher.cli:app"
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "respx>=0.21",
 ]
 
 [build-system]
