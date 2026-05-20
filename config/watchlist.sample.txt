@@ -1,0 +1,11 @@
+# Sample watchlist — one ticker per line; lines starting with # are comments.
+# v1 expects ~200-300 tickers (D3). Copy to config/watchlist.txt and curate.
+AAPL
+MSFT
+GOOGL
+NVDA
+AMZN
+META
+TSLA
+SPY
+QQQ
