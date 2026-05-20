@@ -78,7 +78,7 @@ quant-researcher/
 
 ## 6. 仓库 Schema(仿 valuescope + qr 专属)
 
-**仿 valuescope(数据)**:`companies` · `financial_statements`(含 `known_at`=公布日,实现 D6 务实时点) · `daily_prices` · `analyst_estimates` · `price_target_consensus` · `sector_betas` · `earnings_events`。
+**仿 valuescope(数据)**:`securities`(master) · `profiles`(FMP /profile) · `income_statement` / `balance_sheet` / `cash_flow`(三大报表,**`known_at` = FMP `acceptedDate` 公布日,实现 D6 务实时点**) · `financial_ratios`(MA-3,`known_at`=now,务实让步) · `daily_prices` · `analyst_estimates` · `price_target_consensus`(后) · `sector_betas`(后) · `earnings_events`(后)。
 **qr 专属(产出,皆带 `params` JSONB + `input_snapshot_id` + `code_version` + `model_version`,实现可复现)**:`screens`(定义) · `screen_runs`(结果快照) · `valuation_snapshots` · `research_bundles` · `signals`/`signal_runs` · `decisions`/`decision_tracking` · `backtests`/`backtest_runs` · `snapshots`(通用不可变输入快照,内容哈希)。
 
 ## 7. 里程碑(D4 顺序,逐域扎实)

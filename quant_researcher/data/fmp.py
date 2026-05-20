@@ -99,6 +99,48 @@ class FMPClient:
             )
         return rows
 
+    def get_income_statement(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/income-statement` rows (newest-first; FMP default ~40 periods)."""
+        return self._get_period_list("/income-statement", symbol, period, limit)
+
+    def get_balance_sheet(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/balance-sheet-statement` rows."""
+        return self._get_period_list("/balance-sheet-statement", symbol, period, limit)
+
+    def get_cash_flow(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/cash-flow-statement` rows."""
+        return self._get_period_list("/cash-flow-statement", symbol, period, limit)
+
+    def get_ratios(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/ratios` rows (period-keyed financial ratios)."""
+        return self._get_period_list("/ratios", symbol, period, limit)
+
+    def get_analyst_estimates(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/analyst-estimates` rows (forward-looking consensus)."""
+        return self._get_period_list("/analyst-estimates", symbol, period, limit)
+
+    def _get_period_list(
+        self, path: str, symbol: str, period: str, limit: int | None
+    ) -> list[dict[str, Any]]:
+        """Shared shape for period-keyed list endpoints (statements/ratios/estimates)."""
+        params: dict[str, Any] = {"symbol": symbol, "period": period}
+        if limit is not None:
+            params["limit"] = limit
+        payload = self._get(path, params)
+        if not isinstance(payload, list):
+            raise FMPError(f"{path}: expected list, got {type(payload).__name__}")
+        return payload
+
     def close(self) -> None:
         self._client.close()
 

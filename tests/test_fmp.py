@@ -165,3 +165,75 @@ def test_rate_limiter_does_not_sleep_when_window_empty(
     for _ in range(5):
         client._wait_for_token()
     assert sleeps == []
+
+
+# ----- MA-3 period-keyed endpoints -----------------------------------------
+
+
+# (method-name, FMP path, params it passes besides apikey/period/limit)
+_MA3_ENDPOINTS = [
+    ("get_income_statement", "/income-statement"),
+    ("get_balance_sheet", "/balance-sheet-statement"),
+    ("get_cash_flow", "/cash-flow-statement"),
+    ("get_ratios", "/ratios"),
+    ("get_analyst_estimates", "/analyst-estimates"),
+]
+
+
+@pytest.mark.parametrize(("method", "path"), _MA3_ENDPOINTS)
+@respx.mock
+def test_period_endpoint_happy_path(client: FMPClient, method: str, path: str) -> None:
+    payload = [{"symbol": "AAPL", "period": "Q1", "date": "2024-12-28"}]
+    respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=payload))
+    assert getattr(client, method)("AAPL") == payload
+
+
+@pytest.mark.parametrize(("method", "path"), _MA3_ENDPOINTS)
+@respx.mock
+def test_period_endpoint_passes_period_param(
+    client: FMPClient, method: str, path: str
+) -> None:
+    route = respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=[]))
+    getattr(client, method)("AAPL", period="annual")
+    params = route.calls.last.request.url.params
+    assert params.get("symbol") == "AAPL"
+    assert params.get("period") == "annual"
+    assert params.get("apikey") == "test-key"
+
+
+@pytest.mark.parametrize(("method", "path"), _MA3_ENDPOINTS)
+@respx.mock
+def test_period_endpoint_passes_limit_when_set(
+    client: FMPClient, method: str, path: str
+) -> None:
+    route = respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=[]))
+    getattr(client, method)("AAPL", limit=5)
+    assert route.calls.last.request.url.params.get("limit") == "5"
+
+
+@pytest.mark.parametrize(("method", "path"), _MA3_ENDPOINTS)
+@respx.mock
+def test_period_endpoint_omits_limit_by_default(
+    client: FMPClient, method: str, path: str
+) -> None:
+    route = respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=[]))
+    getattr(client, method)("AAPL")
+    assert "limit" not in route.calls.last.request.url.params
+
+
+@pytest.mark.parametrize(("method", "path"), _MA3_ENDPOINTS)
+@respx.mock
+def test_period_endpoint_empty_list_returns_empty(
+    client: FMPClient, method: str, path: str
+) -> None:
+    respx.get(f"{BASE}{path}").mock(return_value=httpx.Response(200, json=[]))
+    assert getattr(client, method)("AAPL") == []
+
+
+@respx.mock
+def test_period_endpoint_raises_when_payload_not_list(client: FMPClient) -> None:
+    respx.get(f"{BASE}/income-statement").mock(
+        return_value=httpx.Response(200, json={"error": "wrong shape"})
+    )
+    with pytest.raises(FMPError):
+        client.get_income_statement("AAPL")
