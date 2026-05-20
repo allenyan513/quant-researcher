@@ -6,6 +6,7 @@ the `qr db` group only.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import typer
 from sqlalchemy import text
@@ -26,6 +27,13 @@ db_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(db_app)
+
+universe_app = typer.Typer(
+    name="universe",
+    help="Watchlist universe (D3) — set from file, list current.",
+    no_args_is_help=True,
+)
+app.add_typer(universe_app)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +149,80 @@ def db_init() -> None:
                     "total_project_tables": sorted(Base.metadata.tables.keys()),
                 },
                 data_freshness={"db": "live"},
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# qr universe ...
+# ---------------------------------------------------------------------------
+
+
+@universe_app.command("set")
+def universe_set(
+    file: Path = typer.Option(..., "--file", "-f", help="Watchlist file (one ticker per line)."),
+    source: str | None = typer.Option(
+        None, "--source", "-s", help="Label stored on each row (defaults to the file stem)."
+    ),
+) -> None:
+    """Replace the universe with the symbols from `--file` (transactional).
+
+    Blank lines and `#` comments are ignored; tickers are upper-cased and
+    de-duplicated. Also upserts a `securities` master row per new ticker.
+    """
+    from quant_researcher.db import session_factory
+    from quant_researcher.universe import parse_watchlist_file, replace_universe
+
+    try:
+        if not file.exists():
+            _emit(Envelope.failure("universe_file_missing", f"no such file: {file}"))
+        symbols = parse_watchlist_file(file)
+        if not symbols:
+            _emit(Envelope.failure("universe_file_empty", f"no symbols parsed from {file}"))
+        label = source or file.stem
+        with session_factory()() as sess, sess.begin():
+            result = replace_universe(sess, symbols, source=label)
+    except Exception as exc:
+        _emit(Envelope.failure("universe_set_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "source": label,
+                    "file": str(file),
+                    "total": result.total,
+                    "added": result.added,
+                    "removed": result.removed,
+                    "kept_count": len(result.kept),
+                    "new_securities": result.new_securities,
+                },
+                data_freshness={"universe": "live"},
+            )
+        )
+
+
+@universe_app.command("list")
+def universe_list(
+    limit: int | None = typer.Option(None, "--limit", "-n", help="Cap rows returned."),
+) -> None:
+    """Print the current universe (symbol + source + added_at)."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.universe import list_universe
+
+    try:
+        with session_factory()() as sess:
+            rows = list_universe(sess, limit=limit)
+            members = [
+                {"symbol": m.symbol, "source": m.source, "added_at": m.added_at.isoformat()}
+                for m in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("universe_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(members), "members": members},
+                data_freshness={"universe": "live"},
             )
         )
 

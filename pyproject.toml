@@ -33,6 +33,9 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+# Typer's documented pattern is `param: T = typer.Option(...)`; B008 is a
+# false positive for it.
+ignore = ["B008"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["quant_researcher", "tests"]

@@ -37,3 +37,10 @@ def engine() -> Engine:
 def session_factory() -> sessionmaker[Session]:
     """Cached session factory bound to the project engine."""
     return sessionmaker(bind=engine(), expire_on_commit=False, future=True)
+
+
+# Side-effect: register every declarative model onto `Base.metadata` so that
+# `Base.metadata.create_all` (qr db init) and `qr db status` see the full
+# schema. Models depend on `Base` above; this circular import is safe because
+# `Base` is already bound by the time `quant_researcher.models` runs.
+from quant_researcher import models  # noqa: E402, F401
