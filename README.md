@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA-1/2/3/4 已落地(2026-05-20)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据。下一步 MB(筛选 —— 衍生条件 + 技术扫描)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA + MB 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据、**筛选(衍生条件 + 技术扫描)+ 命名/持久化/diff**。下一步 MC(估值)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -70,6 +70,45 @@ STALE=$(uv run qr data freshness --scope quote | jq -r '.data.scopes.quote.stale
 
 要强制刷新所有票(不管 fresh),加 `--force`。阈值定义在 [`quant_researcher/data/freshness.py`](quant_researcher/data/freshness.py)。
 
+### 筛选(MB)
+
+**基本面表达式**用 Python 语法,但只走安全的 AST 子集(comparisons + and/or/not + names + constants)—— 不调 `eval`,拒绝 Call/Attribute/Subscript。允许的字段见 `qr screen fields`(profile / 最新 annual ratios / 最新 close)。
+
+```bash
+# PE 低、PEG 合理、科技行业
+uv run qr screen run --expr "pe < 30 and peg < 1.5 and sector == 'Technology'"
+
+# 价值味更重 + 现金流好
+uv run qr screen run --expr "pb < 3 and fcf_yield > 0.05 and debt_equity < 1.0"
+
+# 行业过滤 + IN list
+uv run qr screen run --expr "sector in ['Technology', 'Energy'] and roe > 0.15"
+```
+
+**技术扫描**是命名 predicate DSL(逗号分隔,所有 AND):
+
+```bash
+# 趋势:在 200 日均线之上 + 最近 5 日 MACD 金叉
+uv run qr screen run --technical "above_sma[200],macd_golden_cross[5]"
+
+# 超卖买入:近 3 日 RSI 跌破 30 + 接近 52 周低点
+uv run qr screen run --technical "rsi_oversold[3],near_52w_low[5]"
+
+# 异动:成交量比 20 日均量 2 倍
+uv run qr screen run --technical "volume_spike[20,2]"
+```
+
+两者可以**叠加**(都是 AND):
+
+```bash
+uv run qr screen run \
+  --expr "pe < 30 and fcf_yield > 0.04" \
+  --technical "above_sma[200]" \
+  --name "growth_value_in_uptrend"
+```
+
+每次 run 都进 `screen_runs` 表(envelope 返回 `run_id`),`qr screen diff --from R1 --to R2` 对比两次结果。
+
 ## 命令速查
 
 | 命令 | 作用 |
@@ -85,6 +124,12 @@ STALE=$(uv run qr data freshness --scope quote | jq -r '.data.scopes.quote.stale
 | `qr data refresh ... --periods annual,quarter` | 财报/比率/估计的 period 过滤 |
 | `qr data refresh ... --lookback-days N` | 新票首次拉 OHLCV 的窗口(默认 730) |
 | `qr data freshness [--scope X] [--symbols A,B]` | 每 scope 的过期/缺失报告;Claude 拿 `stale_symbols` 直接喂 refresh |
+| `qr screen run --expr "..."` | 基本面筛选:`pe < 30 and peg < 1.5 and sector == 'Technology'` 类 Python 表达式 |
+| `qr screen run --technical "..."` | 技术扫描:`above_sma[200],macd_golden_cross[5]` 等命名 predicate,逗号分隔 |
+| `qr screen run ... --name X` | 保存 screen 定义(`screens` 表 upsert);所有 run 都进 `screen_runs` |
+| `qr screen list` / `qr screen runs [--name X]` | 列出保存的 screen / 历史 run |
+| `qr screen diff --from RID1 --to RID2` | 两次 run 的 added/removed/kept 比对 |
+| `qr screen fields` | 列出 `--expr` 允许字段 + `--technical` 可用 predicate |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -121,6 +166,11 @@ quant_researcher/
 │   ├── fmp.py         FMP REST client (httpx, token bucket, retry+jitter)
 │   └── refresh.py     refresh_profile / refresh_quotes / refresh_financials /
 │                      refresh_ratios / refresh_estimates
+├── screen/
+│   ├── indicators.py  numpy 实现的 SMA/EMA/MACD/RSI/rolling_max/min
+│   ├── expression.py  AST-sandbox 的基本面表达式解析器
+│   ├── technical.py   命名 predicate DSL (above_sma/macd_cross/rsi/...)
+│   └── engine.py      state 加载 + run_screen + diff_runs + 持久化
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -128,7 +178,8 @@ quant_researcher/
     ├── prices.py      OHLCV (composite PK)
     ├── financials.py  IncomeStatement / BalanceSheet / CashFlow (共享 mixin)
     ├── ratios.py      FinancialRatios
-    └── estimates.py   AnalystEstimate (forward consensus)
+    ├── estimates.py   AnalystEstimate (forward consensus)
+    └── screens.py     Screen (定义) + ScreenRun (结果快照)
 tests/                 pytest, in-memory SQLite + respx mock
 docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
@@ -144,7 +195,8 @@ config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
   - **MA-2** ✅ — FMP client + `profiles` / `daily_prices` + `qr data refresh --scope profile|quote`
   - **MA-3** ✅ — 财报三表 + ratios + estimates + `--scope financials|ratios|estimates`
   - **MA-4** ✅ — `qr data freshness` + `qr data refresh` 默认只刷过期 + `--force`
-- **MB** 筛选(衍生条件 + 技术扫描)— **下一里程碑**
+- **MB** 筛选 ✅ — AST-sandbox 表达式 + 9 个技术 predicate + `screens` / `screen_runs` + diff
+- **MC** 估值(DCF / PEG / 倍数 / EPV / DDM)— **下一里程碑**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)

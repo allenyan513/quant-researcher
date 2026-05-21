@@ -199,3 +199,33 @@ def test_ma3_known_at_has_no_server_default() -> None:
             f"{table_name}.known_at must NOT have a server_default (D6)"
         )
         assert not col.nullable
+
+
+def test_metadata_includes_mb_tables() -> None:
+    tables = set(Base.metadata.tables.keys())
+    assert "screens" in tables
+    assert "screen_runs" in tables
+
+
+def test_screens_table_shape() -> None:
+    t = Base.metadata.tables["screens"]
+    cols = {c.name for c in t.columns}
+    assert cols == {"name", "expr", "technical", "description", "created_at"}
+    assert [c.name for c in t.primary_key.columns] == ["name"]
+
+
+def test_screen_runs_table_shape() -> None:
+    t = Base.metadata.tables["screen_runs"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "run_id",
+        "screen_name",
+        "expr",
+        "technical",
+        "expr_hash",
+        "ran_at",
+        "universe_size",
+        "result_symbols",
+        "code_version",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["run_id"]

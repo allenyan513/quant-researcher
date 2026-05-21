@@ -42,6 +42,13 @@ data_app = typer.Typer(
 )
 app.add_typer(data_app)
 
+screen_app = typer.Typer(
+    name="screen",
+    help="Stock screening (MB) — fundamental expressions + technical predicates.",
+    no_args_is_help=True,
+)
+app.add_typer(screen_app)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -521,6 +528,232 @@ def data_freshness(
                 data_freshness={"db": "live"},
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# qr screen ...
+# ---------------------------------------------------------------------------
+
+
+@screen_app.command("run")
+def screen_run(
+    expr: str | None = typer.Option(
+        None,
+        "--expr",
+        "-e",
+        help=(
+            "Fundamental Python-like expression, e.g. \"pe < 30 and peg < 1.5\". "
+            "Allowed fields: see `qr screen fields` (TODO) or the docstring of "
+            "quant_researcher.screen.expression.FIELDS."
+        ),
+    ),
+    technical: str | None = typer.Option(
+        None,
+        "--technical",
+        "-t",
+        help=(
+            "Comma-separated technical predicates, e.g. "
+            "'above_sma[200],macd_golden_cross[5]'."
+        ),
+    ),
+    symbols: str | None = typer.Option(
+        None,
+        "--symbols",
+        help="Comma-separated subset of the universe (default: full universe).",
+    ),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="If given, save the screen definition under this name (upsert).",
+    ),
+    description: str | None = typer.Option(
+        None, "--description", help="Optional description, only stored if --name given."
+    ),
+) -> None:
+    """Run a screen (fundamental and/or technical) over the universe.
+
+    At least one of `--expr` / `--technical` must be supplied. Results are
+    persisted to `screen_runs` (anonymous if `--name` omitted); the envelope
+    returns the `run_id` so you can later diff against another run.
+    """
+    from quant_researcher.db import session_factory
+    from quant_researcher.screen.engine import run_screen
+    from quant_researcher.screen.expression import ExpressionError
+    from quant_researcher.screen.technical import TechnicalError
+
+    if not expr and not technical:
+        _emit(
+            Envelope.failure(
+                "missing_predicate",
+                "at least one of --expr / --technical is required.",
+            )
+        )
+
+    target_list = (
+        [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    )
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = run_screen(
+                sess,
+                expr=expr,
+                technical=technical,
+                symbols=target_list,
+                save_name=name,
+                description=description,
+            )
+    except (ExpressionError, TechnicalError) as exc:
+        _emit(Envelope.failure("invalid_screen_spec", str(exc)))
+    except ValueError as exc:
+        _emit(Envelope.failure("screen_run_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("screen_run_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "run_id": result.run_id,
+                    "screen_name": result.screen_name,
+                    "expr": result.expr,
+                    "technical": result.technical,
+                    "universe_size": result.universe_size,
+                    "matched": len(result.result_symbols),
+                    "symbols": result.result_symbols,
+                    "expr_hash": result.expr_hash,
+                },
+                data_freshness={"warehouse": "live"},
+            )
+        )
+
+
+@screen_app.command("list")
+def screen_list() -> None:
+    """List saved screen definitions."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.screens import Screen
+
+    try:
+        with session_factory()() as sess:
+            rows = list(sess.scalars(select(Screen).order_by(Screen.name)))
+            items = [
+                {
+                    "name": s.name,
+                    "expr": s.expr,
+                    "technical": s.technical,
+                    "description": s.description,
+                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                }
+                for s in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("screen_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "screens": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@screen_app.command("runs")
+def screen_runs(
+    name: str | None = typer.Option(
+        None, "--name", "-n", help="Filter to runs of a specific saved screen."
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-l", help="Cap rows returned, newest first (default 20)."
+    ),
+) -> None:
+    """List recent screen runs (newest first)."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.screens import ScreenRun
+
+    try:
+        with session_factory()() as sess:
+            q = select(ScreenRun).order_by(ScreenRun.ran_at.desc()).limit(limit)
+            if name:
+                q = q.where(ScreenRun.screen_name == name)
+            rows = list(sess.scalars(q))
+            items = [
+                {
+                    "run_id": r.run_id,
+                    "screen_name": r.screen_name,
+                    "expr": r.expr,
+                    "technical": r.technical,
+                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                    "universe_size": r.universe_size,
+                    "matched": len(r.result_symbols or []),
+                    "expr_hash": r.expr_hash,
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("screen_runs_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "runs": items, "limit": limit},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@screen_app.command("diff")
+def screen_diff(
+    from_run: str = typer.Option(..., "--from", help="Older run_id."),
+    to_run: str = typer.Option(..., "--to", help="Newer run_id."),
+) -> None:
+    """Compare two screen runs — added / removed / kept symbols."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.screen.engine import diff_runs
+
+    try:
+        with session_factory()() as sess:
+            diff = diff_runs(sess, from_run, to_run)
+    except ValueError as exc:
+        _emit(Envelope.failure("screen_diff_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("screen_diff_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "from": from_run,
+                    "to": to_run,
+                    "added": diff["added"],
+                    "removed": diff["removed"],
+                    "kept": diff["kept"],
+                    "added_count": len(diff["added"]),
+                    "removed_count": len(diff["removed"]),
+                    "kept_count": len(diff["kept"]),
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@screen_app.command("fields")
+def screen_fields() -> None:
+    """List the field names usable in `--expr` and `--technical`."""
+    from quant_researcher.screen.expression import FIELDS
+    from quant_researcher.screen.technical import available_predicates
+
+    _emit(
+        Envelope.success(
+            data={
+                "expression_fields": sorted(FIELDS.keys()),
+                "technical_predicates": available_predicates(),
+            },
+            data_freshness={"code": "live"},
+        )
+    )
 
 
 if __name__ == "__main__":

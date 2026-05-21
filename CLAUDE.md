@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA-1/2/3 已合并 master**,下一里程碑是 **MA-4**(`qr data freshness` + 默认只刷陈旧行)。
+代码现状:**M0 + MA + MB 已合并 master**,下一里程碑是 **MC**(估值:DCF / PEG / 倍数 / EPV / DDM)。
 
 ## 命令(运行前必看)
 
@@ -106,7 +106,17 @@ from quant_researcher import models  # noqa: E402, F401
 
 `refresh_X(session, client, symbols, *, only_stale=True)` —— `only_stale=True`(默认)等价于在函数顶部跑一遍 `symbols = stale_symbols(session, "<scope>", symbols)`。CLI 层 `qr data refresh` 在 `--force` 缺省时按这个路径走;`--force` 时 CLI 自己用 `targets` 跳过 filter 并显式传 `only_stale=False`(避免函数层重做一次)。
 
-### 7. Per-symbol AND per-period 失败隔离
+### 7. MB 筛选 — AST sandbox + 命名 DSL
+
+**基本面表达式** ([`quant_researcher/screen/expression.py`](quant_researcher/screen/expression.py)) 用 `ast.parse(..., mode='eval')` 把字符串解析成 AST,**手工 walk**,**绝不调 `eval`**。允许节点白名单:`BoolOp(And|Or)` / `UnaryOp(Not|USub|UAdd)` / `Compare` / `Name` / `Constant` / `List` / `Tuple`。Call / Attribute / Subscript / Lambda / 推导式全部拒绝。新加字段必须进 `FIELDS` 注册表(同时也是错误消息里的"valid:"列表)。
+
+**技术 DSL** ([`quant_researcher/screen/technical.py`](quant_researcher/screen/technical.py)) 是 `name[arg1,arg2]` 形式,逗号分隔,所有 predicate AND。Predicate 注册表在文件底部 `_REGISTRY`,加新 predicate 时写 factory 函数返回 `Predicate = Callable[[closes, volumes], bool]`。Parser 处理 `[…]` 内嵌逗号(depth 跟踪)。
+
+**State 加载** ([`quant_researcher/screen/engine.py`](quant_researcher/screen/engine.py)) 一次查询每张源表,Python 端按 symbol 聚合(简化 greatest-N-per-group)。规模到 300 票 × ~10 annual ratios = 3k 行,O(N) Python 完全够。MD 起若增加因子要在 SQL 端做窗口函数,届时重写 `build_symbol_state`。
+
+**新增字段流程**:加 column → 加进 `FIELDS` 注册表 → 在 `build_symbol_state` 写填充逻辑 → 加测试 → 文档同步。
+
+### 8. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)
