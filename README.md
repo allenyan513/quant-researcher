@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA + MB 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据、**筛选(衍生条件 + 技术扫描)+ 命名/持久化/diff**。下一步 MC(估值)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA + MB + MC 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据、**筛选(衍生条件 + 技术扫描)**、**估值(DCF-FCFF + PEG + 行业倍数 + 5×5 敏感性 + 快照)**。下一步 MD/ME/MF(研究包 / 持仓 / 决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -109,6 +109,33 @@ uv run qr screen run \
 
 每次 run 都进 `screen_runs` 表(envelope 返回 `run_id`),`qr screen diff --from R1 --to R2` 对比两次结果。
 
+### 估值(MC)
+
+```bash
+# 默认跑 DCF + PEG + 行业倍数,持久化到 valuation_snapshots
+uv run qr value AAPL
+#    envelope.data.fair_value_per_share_mean = (DCF + PEG + multiples) / N
+#    envelope.data.upside_pct_mean = mean / current_price - 1
+#    envelope.data.snapshot_ids = {dcf: uuid, peg: uuid, multiples: uuid}
+
+# 单一模型
+uv run qr value AAPL --model dcf
+uv run qr value AAPL --model multiples
+
+# DCF 假设覆盖(JSON;支持 growth_rate / terminal_growth / wacc / n_years / rf / erp / base_fcf)
+uv run qr value AAPL --model dcf \
+  --assumptions '{"growth_rate": 0.10, "terminal_growth": 0.03, "wacc": 0.09}'
+```
+
+**模型逻辑**:
+- **DCF-FCFF**:用过去 5 年 FCF 推中位 + CAGR(夹在 ±10%/20%),Gordon 终值;5×5 敏感性 grid 覆盖 (growth ± 4pp) × (WACC ± 2pp)。EBITDA 退出倍数留 TODO。
+- **WACC**:Bloomberg 调整 β(`2/3 × β + 1/3`)+ CAPM(默认 RF=4.5%、ERP=5.5%);v1 不做债务结构调整,等价于 cost-of-equity。
+- **PEG**:Lynch 公平 P/E ≈ 年增长率(%)。从 5 年 net_income CAGR 推。
+- **行业倍数**:P/E、EV/EBITDA、P/S 的同行业中位数 × 公司当期指标 → 隐含价值。
+- **EPV/DDM 延后**(同 schema 直接加)。
+
+每次 `qr value` 写 N 行(每模型一行)到 `valuation_snapshots`,JSON `assumptions` + `result` + `sensitivity` 完整可复现。
+
 ## 命令速查
 
 | 命令 | 作用 |
@@ -130,6 +157,8 @@ uv run qr screen run \
 | `qr screen list` / `qr screen runs [--name X]` | 列出保存的 screen / 历史 run |
 | `qr screen diff --from RID1 --to RID2` | 两次 run 的 added/removed/kept 比对 |
 | `qr screen fields` | 列出 `--expr` 允许字段 + `--technical` 可用 predicate |
+| `qr value SYM [--model X]` | 估值:`X ∈ {dcf, peg, multiples, all}`,持久化到 `valuation_snapshots` |
+| `qr value SYM --assumptions '{"growth_rate": 0.10, ...}'` | DCF 假设覆盖(JSON) |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -171,6 +200,13 @@ quant_researcher/
 │   ├── expression.py  AST-sandbox 的基本面表达式解析器
 │   ├── technical.py   命名 predicate DSL (above_sma/macd_cross/rsi/...)
 │   └── engine.py      state 加载 + run_screen + diff_runs + 持久化
+├── valuation/
+│   ├── wacc.py        Bloomberg-adjusted β + CAPM
+│   ├── helpers.py     仓库访问 (历史 FCF / 净债 / 股本 / 同业中位数 / 增长 CAGR)
+│   ├── dcf.py         DCF-FCFF + Gordon terminal + 5×5 sensitivity
+│   ├── peg.py         PEG + Lynch 公平 P/E
+│   ├── multiples.py   P/E / EV/EBITDA / P/S 同业中位数 × 公司指标
+│   └── engine.py      value_company orchestration + ValuationSnapshot 持久化
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -179,7 +215,8 @@ quant_researcher/
     ├── financials.py  IncomeStatement / BalanceSheet / CashFlow (共享 mixin)
     ├── ratios.py      FinancialRatios
     ├── estimates.py   AnalystEstimate (forward consensus)
-    └── screens.py     Screen (定义) + ScreenRun (结果快照)
+    ├── screens.py     Screen (定义) + ScreenRun (结果快照)
+    └── valuation.py   ValuationSnapshot (一行一模型一估值)
 tests/                 pytest, in-memory SQLite + respx mock
 docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
@@ -196,7 +233,8 @@ config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
   - **MA-3** ✅ — 财报三表 + ratios + estimates + `--scope financials|ratios|estimates`
   - **MA-4** ✅ — `qr data freshness` + `qr data refresh` 默认只刷过期 + `--force`
 - **MB** 筛选 ✅ — AST-sandbox 表达式 + 9 个技术 predicate + `screens` / `screen_runs` + diff
-- **MC** 估值(DCF / PEG / 倍数 / EPV / DDM)— **下一里程碑**
+- **MC** 估值 ✅ — DCF-FCFF + Bloomberg-β WACC + PEG + 行业倍数 + 5×5 sensitivity + `valuation_snapshots`(EPV/DDM 延后)
+- **MD/ME/MF** 研究包 / 持仓 + morning call / 决策账本 — **下一里程碑组**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)

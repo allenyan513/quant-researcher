@@ -229,3 +229,27 @@ def test_screen_runs_table_shape() -> None:
         "code_version",
     }
     assert [c.name for c in t.primary_key.columns] == ["run_id"]
+
+
+def test_metadata_includes_mc_tables() -> None:
+    assert "valuation_snapshots" in set(Base.metadata.tables.keys())
+
+
+def test_valuation_snapshots_table_shape() -> None:
+    t = Base.metadata.tables["valuation_snapshots"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "snapshot_id",
+        "symbol",
+        "model_type",
+        "as_of",
+        "fair_value_per_share",
+        "current_price",
+        "upside_pct",
+        "assumptions",
+        "result",
+        "sensitivity",
+        "code_version",
+        "created_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["snapshot_id"]

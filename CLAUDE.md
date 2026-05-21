@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA + MB 已合并 master**,下一里程碑是 **MC**(估值:DCF / PEG / 倍数 / EPV / DDM)。
+代码现状:**M0 + MA + MB + MC 已合并 master**,下一里程碑组是 **MD/ME/MF**(研究数据包 / 持仓 + morningcall / 决策账本)。
 
 ## 命令(运行前必看)
 
@@ -116,7 +116,22 @@ from quant_researcher import models  # noqa: E402, F401
 
 **新增字段流程**:加 column → 加进 `FIELDS` 注册表 → 在 `build_symbol_state` 写填充逻辑 → 加测试 → 文档同步。
 
-### 8. Per-symbol AND per-period 失败隔离
+### 8. MC 估值 — 模型分层 + 快照可复现
+
+**层次**([`quant_researcher/valuation/`](quant_researcher/valuation/))
+- `wacc.py` —— CAPM + Bloomberg adjust(`2/3·β + 1/3`)。v1 不算债务结构(简化到 cost-of-equity),改时增加 `cost_of_debt` / `tax_rate` / `debt_weight` 参数即可,DCF 仍接 WACC 标量。
+- `helpers.py` —— 只读 accessor:`historical_fcf` / `net_debt` / `shares_outstanding`(`net_income/eps_diluted` 推) / `sector_peer_median` / `earnings_growth_rate`。所有方法在数据缺失时返回 None,上层判断。
+- `dcf.py` —— 纯函数 `dcf_fcff` + `sensitivity_5x5`,无 DB 依赖,unit-testable。Terminal value 只有 Gordon,未来加 exit-multiple 走 `terminal_method` 参数。
+- `peg.py` / `multiples.py` —— 模型层,各自接受 session 拉一次数据然后计算。
+- `engine.py` —— `value_company` 是唯一对外入口;CLI 和未来 Python 调用都走这里。每模型写一行 `valuation_snapshots`(JSON `assumptions` + `result` + `sensitivity`),`code_version` 自动写入,replay 可对齐。
+
+**约定**
+- WACC ≤ terminal_growth 时 `dcf_fcff` 抛 `DCFError`(避免 Gordon 除零)。`sensitivity_5x5` 在 grid 里把这种 cell 写成 `None`,而不是抛。
+- 缺数据时 `value_company` 不抛 —— 返回 `models["dcf"]["fair_value_per_share"] = None` + `"note": "..."`,保持 envelope 一致 ok=true。这样 Claude 拉多票时单票坏数据不会废掉整批。
+- 假设覆盖(`assumptions` dict)的 keys 与 `dcf_fcff` 参数 1:1 对应 —— 改名要同步两个地方。
+- 同业中位数即时算,不缓存。如 MG 起需要历史稳定 sector beta,加 `sector_betas` 表;v1 不需要。
+
+### 9. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)

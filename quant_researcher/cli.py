@@ -49,6 +49,9 @@ screen_app = typer.Typer(
 )
 app.add_typer(screen_app)
 
+# `qr value` is a top-level command (not a subgroup) — implementation-plan.md
+# §5 specifies `qr value AAPL [--model X]`.
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -754,6 +757,88 @@ def screen_fields() -> None:
             data_freshness={"code": "live"},
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# qr value ...
+# ---------------------------------------------------------------------------
+
+
+@app.command("value")
+def value_company_cmd(
+    symbol: str = typer.Argument(..., help="Ticker to value (e.g. AAPL)."),
+    model: str = typer.Option(
+        "all",
+        "--model",
+        "-m",
+        help="Which valuation model(s) to run: dcf | peg | multiples | all.",
+    ),
+    assumptions: str | None = typer.Option(
+        None,
+        "--assumptions",
+        "-a",
+        help=(
+            "JSON dict of override assumptions, e.g. "
+            "'{\"growth_rate\": 0.10, \"terminal_growth\": 0.025, \"wacc\": 0.09}'. "
+            "Keys: growth_rate, terminal_growth, wacc, n_years, rf, erp, "
+            "base_fcf, net_debt, shares."
+        ),
+    ),
+) -> None:
+    """Run valuation models against the warehouse and persist a snapshot.
+
+    Defaults to `--model all` which runs DCF + PEG + relative multiples
+    and reports the simple mean of available per-share fair values as
+    `fair_value_per_share_mean`. Pass `--model dcf` (etc.) to limit. The
+    snapshot row in `valuation_snapshots` records assumptions + result +
+    sensitivity grid so a decision is replayable.
+    """
+    import json as _json
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.valuation.engine import VALID_MODELS, value_company
+
+    if model not in VALID_MODELS:
+        _emit(
+            Envelope.failure(
+                "invalid_model",
+                f"--model must be one of {VALID_MODELS}, got {model!r}",
+            )
+        )
+
+    parsed_assumptions: dict | None = None
+    if assumptions:
+        try:
+            parsed_assumptions = _json.loads(assumptions)
+            if not isinstance(parsed_assumptions, dict):
+                raise ValueError("--assumptions must be a JSON object")
+        except (ValueError, TypeError) as exc:
+            _emit(
+                Envelope.failure(
+                    "invalid_assumptions",
+                    f"failed to parse --assumptions JSON: {exc}",
+                )
+            )
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = value_company(
+                sess,
+                symbol.upper(),
+                model=model,
+                assumptions=parsed_assumptions,
+            )
+    except ValueError as exc:
+        _emit(Envelope.failure("valuation_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("valuation_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data=result,
+                data_freshness={"warehouse": "live"},
+            )
+        )
 
 
 if __name__ == "__main__":
