@@ -253,3 +253,36 @@ def test_valuation_snapshots_table_shape() -> None:
         "created_at",
     }
     assert [c.name for c in t.primary_key.columns] == ["snapshot_id"]
+
+
+def test_metadata_includes_me_tables() -> None:
+    assert "holdings" in set(Base.metadata.tables.keys())
+
+
+def test_holdings_table_shape() -> None:
+    t = Base.metadata.tables["holdings"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "account_id",
+        "symbol",
+        "as_of_date",
+        "asset_category",
+        "sub_category",
+        "quantity",
+        "mark_price",
+        "market_value",
+        "avg_cost",
+        "cost_basis_total",
+        "unrealized_pnl",
+        "percent_of_nav",
+        "side",
+        "currency",
+        "fx_rate_to_base",
+        "conid",
+        "listing_exchange",
+        "description",
+        "raw",
+        "source",
+        "known_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["account_id", "symbol", "as_of_date"]

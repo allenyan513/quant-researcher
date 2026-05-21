@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA + MB + MC 已合并 master**,下一里程碑组是 **MD/ME/MF**(研究数据包 / 持仓 + morningcall / 决策账本)。
+代码现状:**M0 + MA + MB + MC + ME(持仓部分)已合并 master**,下一里程碑是 **MD**(研究数据包)+ **MF**(决策账本);ME 的 morningcall 数据包延后到 MD/MF 一起做。
 
 ## 命令(运行前必看)
 
@@ -131,7 +131,28 @@ from quant_researcher import models  # noqa: E402, F401
 - 假设覆盖(`assumptions` dict)的 keys 与 `dcf_fcff` 参数 1:1 对应 —— 改名要同步两个地方。
 - 同业中位数即时算,不缓存。如 MG 起需要历史稳定 sector beta,加 `sector_betas` 表;v1 不需要。
 
-### 9. Per-symbol AND per-period 失败隔离
+### 9. ME 持仓 — Flex API 两步走 + 统一 importer
+
+**Flex 两步流程** ([`quant_researcher/holdings/ibkr_flex.py`](quant_researcher/holdings/ibkr_flex.py))
+1. `SendRequest?t=...&q=...&v=3` → `<FlexStatementResponse>` 含 `ReferenceCode`。
+2. 轮询 `GetStatement?t=...&q=<ref>&v=3` —— 还没生成好时 IBKR 返回 `ErrorCode 1019`(Status=Warn,继续轮询);生成完返回 `<FlexQueryResponse>`,我们解析 `<OpenPositions><OpenPosition .../></OpenPositions>`。`max_poll_attempts=6` × `poll_delay=8s` 默认能 cover 大部分实盘 query。
+
+**Schema 探查**:Flex Query 的字段取决于用户在 IBKR 后台勾了什么。ME-1 用 user 的真 token 拉过一次确认 `position` / `markPrice` / `costBasisPrice` / `fifoPnlUnrealized` / `percentOfNAV` / `accountId` / `reportDate` 都在。改 Flex Query 的 columns 后 importer 自动跟得上(`raw` JSON 保留全部 attrs)。
+
+**统一 importer** ([`holdings/importer.py`](quant_researcher/holdings/importer.py))
+- `import_holdings(session, source="flex"|"csv"|"manual", payload, ...)`,内部转译到统一 `Holding` 字段。
+- 用 `session.merge` —— PK `(account_id, symbol, as_of_date)` 相同时覆盖(同一天再跑 sync 会更新 markPrice 不会冲突)。
+- 单条数据缺 PK 字段进 `result.skipped`,不阻塞其他行。
+
+**CSV 格式**:必需 `account_id, symbol, quantity, as_of_date`(YYYY-MM-DD);可选 `avg_cost / mark_price / market_value / currency / asset_category / side / description`。空数字 cell 入 None。
+
+**坑提醒**:
+- OPT 持仓的 `symbol` 是 OCC 风格(例 `"META  260821P00530000"`,中间双空格),不要 trim/拆分,原样存。
+- `position` 可以是负数(short),`side` 同步写 "Short"。
+- Flex `reportDate` 是 `YYYYMMDD`(无连字符),`_parse_flex_date` 处理。
+- token 别提交进 repo,只走 `.env`。
+
+### 10. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)

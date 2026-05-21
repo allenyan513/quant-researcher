@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import typer
 from sqlalchemy import text
@@ -48,6 +49,302 @@ screen_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(screen_app)
+
+holdings_app = typer.Typer(
+    name="holdings",
+    help="Holdings (ME) — sync from IBKR Flex / import CSV / list / history.",
+    no_args_is_help=True,
+)
+app.add_typer(holdings_app)
+
+# ---------------------------------------------------------------------------
+# qr holdings ...
+# ---------------------------------------------------------------------------
+
+
+@holdings_app.command("sync")
+def holdings_sync(
+    account_override: str | None = typer.Option(
+        None,
+        "--account",
+        help="Override account_id (defaults to value in Flex statement).",
+    ),
+) -> None:
+    """Pull live positions from IBKR Flex (FLEX_TOKEN_KEY + FLEX_QUERY_ID_LIVE)."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.holdings.ibkr_flex import FlexClient, FlexError
+    from quant_researcher.holdings.importer import import_holdings
+
+    cfg = settings()
+    if not cfg.flex_token_key:
+        _emit(
+            Envelope.failure(
+                "missing_flex_token", "FLEX_TOKEN_KEY is not set in .env."
+            )
+        )
+    if not cfg.flex_query_id_live:
+        _emit(
+            Envelope.failure(
+                "missing_flex_query_id",
+                "FLEX_QUERY_ID_LIVE is not set in .env.",
+            )
+        )
+
+    try:
+        with FlexClient(token=cfg.flex_token_key) as flex:
+            meta, raw_positions = flex.fetch_positions(cfg.flex_query_id_live)
+        if account_override:
+            for row in raw_positions:
+                row["accountId"] = account_override
+        with session_factory()() as sess, sess.begin():
+            result = import_holdings(sess, source="flex", payload=raw_positions)
+    except FlexError as exc:
+        _emit(Envelope.failure("flex_fetch_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("holdings_sync_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "source": "flex",
+                    "account_id": result.account_id,
+                    "as_of_date": (
+                        result.as_of_date.isoformat() if result.as_of_date else None
+                    ),
+                    "imported": result.imported,
+                    "symbols": result.symbols,
+                    "skipped": result.skipped,
+                    "statement": {
+                        "query_name": meta.query_name,
+                        "from_date": meta.from_date,
+                        "to_date": meta.to_date,
+                        "when_generated": meta.when_generated,
+                    },
+                },
+                data_freshness={"flex": "live"},
+            )
+        )
+
+
+@holdings_app.command("import-csv")
+def holdings_import_csv(
+    file: Path = typer.Option(
+        ..., "--file", "-f", help="CSV file with required columns: "
+        "account_id, symbol, quantity, as_of_date."
+    ),
+    account_override: str | None = typer.Option(
+        None,
+        "--account",
+        help="Use this account_id when CSV rows don't have one.",
+    ),
+    as_of_override: str | None = typer.Option(
+        None,
+        "--as-of",
+        help="Override as_of_date (YYYY-MM-DD) when CSV rows don't have one.",
+    ),
+) -> None:
+    """Import holdings from a CSV file (file → DB upsert)."""
+    from datetime import date
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.holdings.csv import CSVError, parse_holdings_csv
+    from quant_researcher.holdings.importer import import_holdings
+
+    if not file.exists():
+        _emit(Envelope.failure("csv_file_missing", f"no such file: {file}"))
+
+    as_of_date: date | None = None
+    if as_of_override:
+        try:
+            as_of_date = date.fromisoformat(as_of_override)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_as_of",
+                    f"--as-of must be YYYY-MM-DD, got {as_of_override!r}",
+                )
+            )
+
+    try:
+        rows = parse_holdings_csv(file)
+    except CSVError as exc:
+        _emit(Envelope.failure("csv_parse_failed", str(exc)))
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = import_holdings(
+                sess,
+                source="csv",
+                payload=rows,
+                account_id_override=account_override,
+                as_of_date_override=as_of_date,
+            )
+    except ValueError as exc:
+        _emit(Envelope.failure("holdings_import_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("holdings_import_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "source": "csv",
+                    "file": str(file),
+                    "account_id": result.account_id,
+                    "as_of_date": (
+                        result.as_of_date.isoformat() if result.as_of_date else None
+                    ),
+                    "imported": result.imported,
+                    "symbols": result.symbols,
+                    "skipped": result.skipped,
+                },
+                data_freshness={"csv": "live"},
+            )
+        )
+
+
+@holdings_app.command("list")
+def holdings_list(
+    account: str | None = typer.Option(
+        None, "--account", "-a", help="Filter to a specific account_id."
+    ),
+    as_of: str = typer.Option(
+        "latest",
+        "--as-of",
+        help=(
+            "`latest` (default) or YYYY-MM-DD. `latest` picks the most-recent"
+            " date per (account, symbol)."
+        ),
+    ),
+) -> None:
+    """List current holdings (defaults to latest snapshot per account/symbol)."""
+    from datetime import date as _date
+
+    from sqlalchemy import func, select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.holdings import Holding
+
+    target_date: _date | None = None
+    if as_of != "latest":
+        try:
+            target_date = _date.fromisoformat(as_of)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_as_of",
+                    f"--as-of must be 'latest' or YYYY-MM-DD, got {as_of!r}",
+                )
+            )
+
+    try:
+        with session_factory()() as sess:
+            if target_date is not None:
+                stmt = select(Holding).where(Holding.as_of_date == target_date)
+            else:
+                # Latest per (account, symbol) via correlated subquery.
+                sub = (
+                    select(
+                        Holding.account_id,
+                        Holding.symbol,
+                        func.max(Holding.as_of_date).label("max_date"),
+                    )
+                    .group_by(Holding.account_id, Holding.symbol)
+                    .subquery()
+                )
+                stmt = select(Holding).join(
+                    sub,
+                    (Holding.account_id == sub.c.account_id)
+                    & (Holding.symbol == sub.c.symbol)
+                    & (Holding.as_of_date == sub.c.max_date),
+                )
+            if account:
+                stmt = stmt.where(Holding.account_id == account)
+            rows = list(sess.scalars(stmt.order_by(Holding.account_id, Holding.symbol)))
+            items = [_holding_to_dict(h) for h in rows]
+    except Exception as exc:
+        _emit(Envelope.failure("holdings_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "count": len(items),
+                    "filter": {"account": account, "as_of": as_of},
+                    "holdings": items,
+                    "total_market_value": _sum_floats(
+                        items, "market_value"
+                    ),
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@holdings_app.command("history")
+def holdings_history(
+    symbol: str = typer.Option(..., "--symbol", "-s", help="Symbol to trace."),
+    account: str | None = typer.Option(
+        None, "--account", "-a", help="Optional account filter."
+    ),
+    limit: int = typer.Option(
+        30, "--limit", "-l", help="Most-recent N rows (default 30)."
+    ),
+) -> None:
+    """Show snapshot history for one symbol (sorted newest first)."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.holdings import Holding
+
+    try:
+        with session_factory()() as sess:
+            stmt = select(Holding).where(Holding.symbol == symbol)
+            if account:
+                stmt = stmt.where(Holding.account_id == account)
+            stmt = stmt.order_by(Holding.as_of_date.desc()).limit(limit)
+            rows = list(sess.scalars(stmt))
+            items = [_holding_to_dict(h) for h in rows]
+    except Exception as exc:
+        _emit(Envelope.failure("holdings_history_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "symbol": symbol,
+                    "account": account,
+                    "count": len(items),
+                    "history": items,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+def _holding_to_dict(h: Any) -> dict[str, Any]:
+    return {
+        "account_id": h.account_id,
+        "symbol": h.symbol,
+        "as_of_date": h.as_of_date.isoformat() if h.as_of_date else None,
+        "asset_category": h.asset_category,
+        "sub_category": h.sub_category,
+        "quantity": h.quantity,
+        "mark_price": h.mark_price,
+        "market_value": h.market_value,
+        "avg_cost": h.avg_cost,
+        "cost_basis_total": h.cost_basis_total,
+        "unrealized_pnl": h.unrealized_pnl,
+        "percent_of_nav": h.percent_of_nav,
+        "side": h.side,
+        "currency": h.currency,
+        "source": h.source,
+    }
+
+
+def _sum_floats(items: list[dict], key: str) -> float | None:
+    vals = [i.get(key) for i in items if i.get(key) is not None]
+    if not vals:
+        return None
+    return sum(vals)
+
 
 # `qr value` is a top-level command (not a subgroup) — implementation-plan.md
 # §5 specifies `qr value AAPL [--model X]`.

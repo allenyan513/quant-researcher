@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA + MB + MC 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据、**筛选(衍生条件 + 技术扫描)**、**估值(DCF-FCFF + PEG + 行业倍数 + 5×5 敏感性 + 快照)**。下一步 MD/ME/MF(研究包 / 持仓 / 决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA + MB + MC + ME 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 估计的刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**IBKR Flex 持仓导入 + CSV 持仓 + 历史快照**。下一步 MD(研究数据包)+ MF(决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -136,6 +136,21 @@ uv run qr value AAPL --model dcf \
 
 每次 `qr value` 写 N 行(每模型一行)到 `valuation_snapshots`,JSON `assumptions` + `result` + `sensitivity` 完整可复现。
 
+### 持仓(ME)
+
+两种来源:
+- **IBKR Flex Query API**(推荐) —— 需要在 IBKR 后台建好 Flex Query 并把 `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` 填到 `.env`。`qr holdings sync` 两步走(SendRequest 拿 reference,GetStatement 轮询直到生成完),自动解析 XML,upsert 到 `holdings`。
+- **CSV** —— `qr holdings import-csv --file path.csv`。必需列 `account_id, symbol, quantity, as_of_date`,可选 `avg_cost, mark_price, market_value, currency, asset_category, side, description`。
+
+`holdings` 表 PK 是 `(account_id, symbol, as_of_date)`,所以**每天一份快照**自动累积 —— 同一 PK 重跑会覆盖(merge),不同 `as_of_date` 累加。`qr holdings history --symbol AAPL` 走时间线。
+
+```bash
+uv run qr holdings sync                                              # 从 Flex 拉一次
+uv run qr holdings list                                              # 默认每 (账户, 票) 最新
+uv run qr holdings list --as-of 2026-05-20                           # 特定日期
+uv run qr holdings history --symbol AAPL --limit 30                  # 单票回看 30 个快照
+```
+
 ## 命令速查
 
 | 命令 | 作用 |
@@ -159,6 +174,10 @@ uv run qr value AAPL --model dcf \
 | `qr screen fields` | 列出 `--expr` 允许字段 + `--technical` 可用 predicate |
 | `qr value SYM [--model X]` | 估值:`X ∈ {dcf, peg, multiples, all}`,持久化到 `valuation_snapshots` |
 | `qr value SYM --assumptions '{"growth_rate": 0.10, ...}'` | DCF 假设覆盖(JSON) |
+| `qr holdings sync` | 从 IBKR Flex (`FLEX_TOKEN_KEY` + `FLEX_QUERY_ID_LIVE`) 拉持仓快照 |
+| `qr holdings import-csv --file PATH [--account A] [--as-of YYYY-MM-DD]` | 从 CSV 导入持仓 |
+| `qr holdings list [--account A] [--as-of latest\|YYYY-MM-DD]` | 列当前持仓,默认每 (account, symbol) 取最新 |
+| `qr holdings history --symbol SYM [--account A] [--limit N]` | 单票快照历史(新→旧) |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -207,6 +226,10 @@ quant_researcher/
 │   ├── peg.py         PEG + Lynch 公平 P/E
 │   ├── multiples.py   P/E / EV/EBITDA / P/S 同业中位数 × 公司指标
 │   └── engine.py      value_company orchestration + ValuationSnapshot 持久化
+├── holdings/
+│   ├── ibkr_flex.py   IBKR Flex Statement API client (SendRequest + 轮询 + XML 解析)
+│   ├── csv.py         parse_holdings_csv (header 校验 + 类型强转)
+│   └── importer.py    flex / csv → Holding 统一上插
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -216,7 +239,8 @@ quant_researcher/
     ├── ratios.py      FinancialRatios
     ├── estimates.py   AnalystEstimate (forward consensus)
     ├── screens.py     Screen (定义) + ScreenRun (结果快照)
-    └── valuation.py   ValuationSnapshot (一行一模型一估值)
+    ├── valuation.py   ValuationSnapshot (一行一模型一估值)
+    └── holdings.py    Holding (PK = account+symbol+as_of_date,每天快照累加)
 tests/                 pytest, in-memory SQLite + respx mock
 docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
@@ -234,7 +258,8 @@ config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
   - **MA-4** ✅ — `qr data freshness` + `qr data refresh` 默认只刷过期 + `--force`
 - **MB** 筛选 ✅ — AST-sandbox 表达式 + 9 个技术 predicate + `screens` / `screen_runs` + diff
 - **MC** 估值 ✅ — DCF-FCFF + Bloomberg-β WACC + PEG + 行业倍数 + 5×5 sensitivity + `valuation_snapshots`(EPV/DDM 延后)
-- **MD/ME/MF** 研究包 / 持仓 + morning call / 决策账本 — **下一里程碑组**
+- **ME** 持仓 ✅ — IBKR Flex Python client + CSV importer + `holdings` 快照 + `qr holdings sync/import-csv/list/history`(morningcall 数据包延后)
+- **MD** 研究数据包 + **MF** 决策账本 — **下一里程碑**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)
