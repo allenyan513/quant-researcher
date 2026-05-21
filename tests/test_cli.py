@@ -682,6 +682,184 @@ def test_screen_fields() -> None:
     assert "macd_golden_cross" in data["technical_predicates"]
 
 
+# ----- MC: qr value --------------------------------------------------------
+
+
+def _seed_valuation_company(memory_db_factory, sym: str = "AAPL") -> None:
+    from datetime import UTC, date, datetime
+
+    from quant_researcher.models.financials import (
+        BalanceSheet,
+        CashFlow,
+        IncomeStatement,
+    )
+    from quant_researcher.models.prices import DailyPrice
+    from quant_researcher.models.profile import Profile
+    from quant_researcher.models.ratios import FinancialRatios
+
+    with memory_db_factory() as sess:
+        sess.add(
+            Profile(
+                symbol=sym,
+                sector="Technology",
+                beta=1.2,
+                raw={"mktCap": 3e12},
+                known_at=datetime.now(UTC),
+            )
+        )
+        for i in range(5):
+            sess.add(
+                IncomeStatement(
+                    symbol=sym,
+                    period="FY",
+                    fiscal_date=date(2020 + i, 9, 30),
+                    net_income=1e10 * (1.08**i),
+                    eps_diluted=5.0 * (1.08**i),
+                    operating_income=1.5e10 * (1.08**i),
+                    revenue=5e10 * (1.08**i),
+                    known_at=datetime.now(UTC),
+                )
+            )
+            sess.add(
+                CashFlow(
+                    symbol=sym,
+                    period="FY",
+                    fiscal_date=date(2020 + i, 9, 30),
+                    free_cash_flow=8e9 * (1.08**i),
+                    capital_expenditure=-2e9 * (1.08**i),
+                    known_at=datetime.now(UTC),
+                )
+            )
+        sess.add(
+            BalanceSheet(
+                symbol=sym,
+                period="FY",
+                fiscal_date=date(2024, 9, 30),
+                short_term_debt=1e10,
+                long_term_debt=5e10,
+                cash_and_equivalents=4e10,
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.add(
+            FinancialRatios(
+                symbol=sym,
+                period="FY",
+                fiscal_date=date(2024, 9, 30),
+                pe_ratio=28.0,
+                ev_to_ebitda=22.0,
+                price_to_sales=8.0,
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.add(
+            DailyPrice(symbol=sym, trade_date=date(2024, 9, 30), close=200.0)
+        )
+        sess.commit()
+
+
+def test_value_dcf_happy_path(memory_db) -> None:
+    _seed_valuation_company(memory_db)
+    result = runner.invoke(app, ["value", "AAPL", "--model", "dcf"])
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["symbol"] == "AAPL"
+    assert data["model"] == "dcf"
+    assert "dcf" in data["models"]
+    assert data["models"]["dcf"]["fair_value_per_share"] is not None
+
+
+def test_value_all_models(memory_db) -> None:
+    _seed_valuation_company(memory_db)
+    # Also seed a peer so multiples can compute.
+    from datetime import UTC, date, datetime
+
+    from quant_researcher.models.profile import Profile
+    from quant_researcher.models.ratios import FinancialRatios
+
+    with memory_db() as sess:
+        sess.add(
+            Profile(
+                symbol="MSFT",
+                sector="Technology",
+                beta=1.1,
+                raw={"mktCap": 2e12},
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.add(
+            FinancialRatios(
+                symbol="MSFT",
+                period="FY",
+                fiscal_date=date(2024, 9, 30),
+                pe_ratio=30.0,
+                ev_to_ebitda=20.0,
+                price_to_sales=10.0,
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.commit()
+
+    result = runner.invoke(app, ["value", "AAPL"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert set(data["models"].keys()) == {"dcf", "peg", "multiples"}
+    assert data["fair_value_per_share_mean"] is not None
+
+
+def test_value_requires_symbol(memory_db) -> None:
+    # No symbol → typer raises a usage error (exit code 2), not our envelope.
+    result = runner.invoke(app, ["value"])
+    assert result.exit_code != 0
+    assert "Missing argument" in result.output or "Usage" in result.output
+
+
+def test_value_rejects_invalid_model(memory_db) -> None:
+    result = runner.invoke(app, ["value", "AAPL", "--model", "junk"])
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert payloads[0]["error"]["code"] == "invalid_model"
+
+
+def test_value_rejects_invalid_assumptions_json(memory_db) -> None:
+    result = runner.invoke(
+        app, ["value", "AAPL", "--assumptions", "{not-json"]
+    )
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert payloads[0]["error"]["code"] == "invalid_assumptions"
+
+
+def test_value_assumptions_override_threads_through(memory_db) -> None:
+    _seed_valuation_company(memory_db)
+    result = runner.invoke(
+        app,
+        [
+            "value",
+            "AAPL",
+            "--model",
+            "dcf",
+            "--assumptions",
+            '{"growth_rate": 0.10, "wacc": 0.09, "terminal_growth": 0.03}',
+        ],
+    )
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    a = data["models"]["dcf"]["core"]["assumptions"]
+    assert a["growth_rate"] == 0.10
+    assert a["wacc"] == 0.09
+    assert a["terminal_growth"] == 0.03
+
+
+def test_value_no_data_returns_null_fair_value(memory_db) -> None:
+    result = runner.invoke(app, ["value", "GHOST", "--model", "dcf"])
+    assert result.exit_code == 0  # not an error, just no data
+    data = _json_lines(result.output)[0]["data"]
+    assert data["models"]["dcf"]["fair_value_per_share"] is None
+
+
 def test_data_refresh_all_scope_covers_every_table(memory_db, data_env) -> None:
     _seed_universe(memory_db, ["AAPL"])
     data_env.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}
