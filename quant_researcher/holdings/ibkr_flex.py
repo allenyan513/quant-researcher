@@ -37,6 +37,15 @@ class FlexError(RuntimeError):
         self.code = code
 
 
+# IBKR error codes that mean "transient, try again shortly":
+#   1001 — Statement could not be generated at this time.
+#   1004 — Statement is not yet available.
+#   1007 — Statement is not yet generated. Statement generation is in progress.
+#   1019 — Statement generation in progress. Please try again shortly.
+# Everything else is treated as permanent (bad token, bad query id, etc.)
+_TRANSIENT_CODES = frozenset({"1001", "1004", "1007", "1019"})
+
+
 @dataclass(frozen=True)
 class FlexStatementMeta:
     """Per-statement header info pulled from the response root."""
@@ -93,30 +102,42 @@ class FlexClient:
     # ---- internals -------------------------------------------------------
 
     def _send_request(self, query_id: str) -> str:
-        r = self._client.get(
-            f"{self._base_url}/FlexStatementService.SendRequest",
-            params={"t": self._token, "q": query_id, "v": 3},
-        )
-        if r.status_code != 200:
-            raise FlexError(
-                f"SendRequest HTTP {r.status_code}: {r.text[:200]}"
+        last_err: str | None = None
+        for attempt in range(1, self._max_polls + 1):
+            if attempt > 1:
+                time.sleep(self._poll_delay)
+            r = self._client.get(
+                f"{self._base_url}/FlexStatementService.SendRequest",
+                params={"t": self._token, "q": query_id, "v": 3},
             )
-        try:
-            root = ET.fromstring(r.text)
-        except ET.ParseError as exc:
-            raise FlexError(f"SendRequest malformed XML: {exc}") from exc
-        status = root.findtext("Status") or ""
-        if status != "Success":
+            if r.status_code != 200:
+                last_err = f"HTTP {r.status_code}"
+                continue
+            try:
+                root = ET.fromstring(r.text)
+            except ET.ParseError as exc:
+                raise FlexError(f"SendRequest malformed XML: {exc}") from exc
+            status = root.findtext("Status") or ""
+            if status == "Success":
+                ref = root.findtext("ReferenceCode")
+                if not ref:
+                    raise FlexError(
+                        "SendRequest succeeded but no ReferenceCode in response"
+                    )
+                return ref
             code = root.findtext("ErrorCode") or ""
             msg = root.findtext("ErrorMessage") or ""
+            if code in _TRANSIENT_CODES:
+                last_err = f"transient {code}: {msg}"
+                continue
+            # Permanent failure (bad token, etc.) — surface immediately.
             raise FlexError(
                 f"SendRequest failed: status={status!r} code={code!r} msg={msg!r}",
                 code=code,
             )
-        ref = root.findtext("ReferenceCode")
-        if not ref:
-            raise FlexError("SendRequest succeeded but no ReferenceCode in response")
-        return ref
+        raise FlexError(
+            f"SendRequest gave up after {self._max_polls} attempts: {last_err}"
+        )
 
     def _poll_statement(self, ref: str) -> str:
         last_err: str | None = None
@@ -141,8 +162,8 @@ class FlexClient:
                 status = root.findtext("Status") or ""
                 code = root.findtext("ErrorCode") or ""
                 msg = root.findtext("ErrorMessage") or ""
-                if code == "1019":  # still generating
-                    last_err = f"pending (1019: {msg})"
+                if code in _TRANSIENT_CODES:
+                    last_err = f"pending {code}: {msg}"
                     continue
                 raise FlexError(
                     f"GetStatement failed: status={status!r} code={code!r} msg={msg!r}",

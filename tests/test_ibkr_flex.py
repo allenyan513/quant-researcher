@@ -45,6 +45,12 @@ _SEND_FAIL = """<FlexStatementResponse timestamp='21 May, 2026 09:25 AM EDT'>
 <ErrorMessage>Token has expired.</ErrorMessage>
 </FlexStatementResponse>"""
 
+_SEND_TRANSIENT_1001 = """<FlexStatementResponse timestamp='21 May, 2026 09:25 AM EDT'>
+<Status>Fail</Status>
+<ErrorCode>1001</ErrorCode>
+<ErrorMessage>Statement could not be generated at this time.</ErrorMessage>
+</FlexStatementResponse>"""
+
 _GET_PENDING = """<FlexStatementResponse timestamp='21 May, 2026 09:25 AM EDT'>
 <Status>Warn</Status>
 <ErrorCode>1019</ErrorCode>
@@ -142,6 +148,31 @@ def test_send_request_fail_raises(client: FlexClient) -> None:
         return_value=httpx.Response(200, text=_SEND_FAIL)
     )
     with pytest.raises(FlexError, match="Token has expired"):
+        client.fetch_positions(1440609)
+
+
+@respx.mock
+def test_send_request_retries_on_1001(client: FlexClient) -> None:
+    """ErrorCode 1001 (Statement could not be generated) is transient — retry."""
+    respx.get(f"{BASE}/FlexStatementService.SendRequest").mock(
+        side_effect=[
+            httpx.Response(200, text=_SEND_TRANSIENT_1001),
+            httpx.Response(200, text=_SEND_OK),
+        ]
+    )
+    respx.get(f"{BASE}/FlexStatementService.GetStatement").mock(
+        return_value=httpx.Response(200, text=_SAMPLE_QUERY_RESPONSE)
+    )
+    meta, positions = client.fetch_positions(1440609)
+    assert len(positions) == 2
+
+
+@respx.mock
+def test_send_request_exhausts_retries(client: FlexClient) -> None:
+    respx.get(f"{BASE}/FlexStatementService.SendRequest").mock(
+        return_value=httpx.Response(200, text=_SEND_TRANSIENT_1001)
+    )
+    with pytest.raises(FlexError, match="gave up"):
         client.fetch_positions(1440609)
 
 

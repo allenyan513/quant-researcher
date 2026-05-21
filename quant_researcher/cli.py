@@ -69,6 +69,23 @@ def holdings_sync(
         "--account",
         help="Override account_id (defaults to value in Flex statement).",
     ),
+    max_attempts: int = typer.Option(
+        6,
+        "--max-attempts",
+        help=(
+            "Max poll attempts (applied to both SendRequest transient codes "
+            "1001/1004 and GetStatement 1007/1019). Default 6."
+        ),
+    ),
+    poll_delay: float = typer.Option(
+        8.0,
+        "--poll-delay",
+        help=(
+            "Seconds between attempts. IBKR sometimes needs minutes between "
+            "Flex calls for the same query — bump this to e.g. 30 with "
+            "--max-attempts 12 for a ~6-minute patience budget."
+        ),
+    ),
 ) -> None:
     """Pull live positions from IBKR Flex (FLEX_TOKEN_KEY + FLEX_QUERY_ID_LIVE)."""
     from quant_researcher.db import session_factory
@@ -91,7 +108,11 @@ def holdings_sync(
         )
 
     try:
-        with FlexClient(token=cfg.flex_token_key) as flex:
+        with FlexClient(
+            token=cfg.flex_token_key,
+            max_poll_attempts=max_attempts,
+            poll_delay=poll_delay,
+        ) as flex:
             meta, raw_positions = flex.fetch_positions(cfg.flex_query_id_live)
         if account_override:
             for row in raw_positions:
