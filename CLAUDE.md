@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA + MB + MC + ME(持仓部分)+ MD 已合并 master**,下一里程碑是 **MF**(决策账本)。ME 的 morningcall 数据包延后到 MF 或后续。
+代码现状:**M0 + MA + MB + MC + ME(持仓部分)+ MD + MF 已合并 master**,下一里程碑是 **MG**(信号研究)或 **MH**(回测,移植 quant-engine)。ME 的 morningcall 数据包仍延后。
 
 ## 命令(运行前必看)
 
@@ -162,7 +162,22 @@ from quant_researcher import models  # noqa: E402, F401
 
 **transcript_excerpt 是 caller-provided**:bundler 不主动调 FMP `/earning-call-transcript`(那个 endpoint 很大,2000 字 truncate 后还是几 K 字符)。`qr research bundle` v1 不传 transcript,留个 hook。后面如果要做 earnings-read 单独命令(`qr research earnings SYM`)再决定要不要主动拉。
 
-### 11. Per-symbol AND per-period 失败隔离
+### 11. MF 决策账本 — record / track / scorecard
+
+**3 个入口** ([`quant_researcher/ledger/engine.py`](quant_researcher/ledger/engine.py))
+- `record_decision(session, symbol, side, thesis, confidence, tags)` — 写 Decision 行 + 调 `research.bundler.bundle` 把当时仓库状态快照存进 research_bundles,`bundle_id` 入 Decision。`price_at_open` = `_price_at_or_before(symbol, opened_at)` —— **不**是 latest_close(latest_close 在测试里会拿到未来的 seed bar,实战可能拿到刚 ingest 的盘后 bar)。
+- `track_decisions(session, as_of=None)` — for each Decision × 4 horizon(1w/1m/3m/6m),如果 `target_date <= as_of` 就计算 forward return + SPY return + sector return + alpha,`session.merge` 进 decision_tracking。**`session.merge` 关键**,re-run 同 horizon 覆盖不会冲突。
+- `scorecard(session, group_by, horizon)` — 拉 Decision + tracking 行,Python 端按 group_by ∈ {confidence, sector, tag} 聚合,按 avg_alpha 降序返回。tag 是 list → 一条决策入 N 个 tag 组。
+
+**关键设计点**
+- **Alpha 计算**:`alpha = return − benchmark`,benchmark 用 sector ETF 优先(`sectors.etf_for_sector`),没匹配到 fall back 到 SPY。
+- **Short 决策**:`side="sell"` 时 `return_pct = -(end/start - 1)`,股价跌 10% → +10%。
+- **Price staleness window = 3 天**:`_price_near_date` 在 target_date ±3 天内没 bar 就返 None,避免拿月初的价格冒充月末(weekends+1 holiday 够用,长 gap 就是数据问题)。
+- **Sector ETF mapping** 是硬编码常量([sectors.py](quant_researcher/ledger/sectors.py)),lowercase 匹配,缺失 fall back to SPY。FMP 的 sector strings 有变体(`"Financial Services"` vs `"Financials"`),映射表两个都收。
+
+**注意:SPY 和 sector ETF 不是默认 universe 成员** —— 你得手动 `qr universe set` 把 SPY / XLK / XLE 等加进去然后 `qr data refresh --scope quote`,scorecard 才有 benchmark 数据。否则 alpha 列是 None。
+
+### 12. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)

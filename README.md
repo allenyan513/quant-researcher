@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA + MB + MC + ME + MD 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 估计的刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**IBKR Flex / CSV 持仓 + 历史快照**、**研究数据包(profile + financials + ratios + estimates + valuation + holdings + news 一站聚合)**。下一步 MF(决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA + MB + MC + ME + MD + MF 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile/OHLCV/三大报表/比率/估计刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**Flex/CSV 持仓快照**、**研究数据包**、**决策账本(snapshot + 1w/1m/3m/6m 跟踪 vs SPY/sector ETF + scorecard)**。下一步 **MG**(信号研究:因子 IC/分位)或 **MH**(回测,移植 quant-engine)。路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -182,6 +182,11 @@ uv run qr holdings history --symbol AAPL --limit 30                  # 单票回
 | `qr research news --symbols A,B [--limit N]` | 从 FMP 拉新闻进 `news_items`(夸 plan 402 软失败) |
 | `qr research list [--symbol S] [--limit N]` | 列历史 bundle(新→旧) |
 | `qr research show BUNDLE_ID` | 看某次 bundle 的完整 payload |
+| `qr ledger add SYM --side buy\|sell [--thesis "..." --confidence N --tags A,B]` | 记一笔决策,自动 snapshot 当时的 research_bundle |
+| `qr ledger track` | 对所有决策算 1w/1m/3m/6m 远期收益 vs SPY + sector ETF |
+| `qr ledger list [--symbol] [--side]` | 列历次决策 |
+| `qr ledger scorecard --group-by confidence\|sector\|tag [--horizon 1w\|1m\|3m\|6m]` | 按维度看 avg alpha / return |
+| `qr ledger show DECISION_ID` | 单笔决策 + 跟踪表 |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -237,6 +242,9 @@ quant_researcher/
 ├── research/
 │   ├── bundler.py     build_bundle (DB → JSON aggregator) + bundle (持久化)
 │   └── refresh.py     refresh_news (FMP /news/stock-latest → news_items dedup)
+├── ledger/
+│   ├── sectors.py     sector → SPDR ETF 映射 (XLK/XLF/XLE/...)
+│   └── engine.py      record_decision + track_decisions + scorecard
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -248,7 +256,8 @@ quant_researcher/
     ├── screens.py     Screen (定义) + ScreenRun (结果快照)
     ├── valuation.py   ValuationSnapshot (一行一模型一估值)
     ├── holdings.py    Holding (PK = account+symbol+as_of_date,每天快照累加)
-    └── research.py    NewsItem (新闻缓存) + ResearchBundle (聚合快照)
+    ├── research.py    NewsItem (新闻缓存) + ResearchBundle (聚合快照)
+    └── decisions.py   Decision + DecisionTracking (买卖决策 + 远期 alpha 表)
 tests/                 pytest, in-memory SQLite + respx mock
 docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
@@ -281,6 +290,38 @@ bundle 包含:
 
 数据缺一项 bundle 不挂,该 section 是 None 或 [];可复现:`bundle_id` + `code_version` 入 `research_bundles`。
 
+### 决策账本(MF)
+
+每个 Claude 买卖决定 + 论点 + 数据快照 + 远期 alpha,持久化可复现:
+
+```bash
+# 记一笔
+uv run qr ledger add NVDA --side buy --thesis "AI 周期延续, EPV upside" \
+  --confidence 4 --tags AI,cycle,growth
+#   → bundle_id 自动指向当时的 research_bundles 快照, price_at_open 是当日 close
+
+# (过一阵)算远期收益:1w/1m/3m/6m vs SPY + 行业 ETF
+uv run qr ledger track
+#   只算"已经过期"的 horizon (e.g. 决策开了 35 天 → 1w + 1m 都算; 3m/6m skip)
+
+# 看 scorecard
+uv run qr ledger scorecard --group-by confidence --horizon 1m
+#   返回每个 confidence 分组的 decision_count / avg_return_pct / avg_alpha_pct / median_alpha_pct
+#   群体按 avg_alpha 降序
+
+uv run qr ledger scorecard --group-by sector --horizon 3m
+uv run qr ledger scorecard --group-by tag --horizon 6m
+
+# 看单笔
+uv run qr ledger show <decision_id>
+```
+
+**Alpha 计算**:`alpha = symbol_return − benchmark_return`,benchmark 优先用 sector ETF(XLK/XLF/XLE/XLV/...),没匹配到就退到 SPY。sector→ETF 映射在 [`quant_researcher/ledger/sectors.py`](quant_researcher/ledger/sectors.py)。
+
+**Short 决策(side=sell)**:return 取反 —— 股价跌 10% 的 short = +10% return,语义跟 long 一致。
+
+**Tracking 容忍 ±3 天**:某 horizon 的 target_date 附近 3 天内必须有 bar,否则该格写 None(避免拿月初的价格冒充月末)。
+
 ## 路线图
 
 按 D4 顺序 `A → B → C → D/E/F → G → H` 逐域扎实:
@@ -295,7 +336,8 @@ bundle 包含:
 - **MC** 估值 ✅ — DCF-FCFF + Bloomberg-β WACC + PEG + 行业倍数 + 5×5 sensitivity + `valuation_snapshots`(EPV/DDM 延后)
 - **ME** 持仓 ✅ — IBKR Flex Python client + CSV importer + `holdings` 快照 + `qr holdings sync/import-csv/list/history`(morningcall 数据包延后)
 - **MD** 研究包 ✅ — `news_items` + `research_bundles` + `qr research bundle/news/list/show`(一站聚合所有 warehouse 数据)
-- **MF** 决策账本 — **下一里程碑**
+- **MF** 决策账本 ✅ — `decisions` + `decision_tracking` + 1w/1m/3m/6m vs SPY+sector ETF + scorecard
+- **MG** 信号研究 / **MH** 回测 — **下一里程碑**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)
