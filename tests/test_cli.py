@@ -860,6 +860,189 @@ def test_value_no_data_returns_null_fair_value(memory_db) -> None:
     assert data["models"]["dcf"]["fair_value_per_share"] is None
 
 
+# ----- ME: qr holdings -----------------------------------------------------
+
+
+def test_holdings_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["holdings", "--help"])
+    assert result.exit_code == 0
+    for sub in ("sync", "import-csv", "list", "history"):
+        assert sub in result.output
+
+
+def test_holdings_import_csv_happy_path(memory_db, tmp_path: Path) -> None:
+    csv_path = tmp_path / "h.csv"
+    csv_path.write_text(
+        "account_id,symbol,quantity,as_of_date,avg_cost,mark_price\n"
+        "U1,AAPL,100,2026-05-20,150.0,200.0\n"
+        "U1,MSFT,50,2026-05-20,250.0,310.0\n"
+    )
+    result = runner.invoke(
+        app, ["holdings", "import-csv", "--file", str(csv_path)]
+    )
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["imported"] == 2
+    assert data["account_id"] == "U1"
+    assert sorted(data["symbols"]) == ["AAPL", "MSFT"]
+
+
+def test_holdings_import_csv_missing_file(memory_db, tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["holdings", "import-csv", "--file", str(tmp_path / "nope.csv")],
+    )
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    assert payloads[0]["error"]["code"] == "csv_file_missing"
+
+
+def test_holdings_import_csv_bad_format(memory_db, tmp_path: Path) -> None:
+    bad = tmp_path / "h.csv"
+    bad.write_text("symbol,quantity\nAAPL,100\n")  # missing required cols
+    result = runner.invoke(app, ["holdings", "import-csv", "--file", str(bad)])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "csv_parse_failed"
+
+
+def test_holdings_list_returns_latest(memory_db, tmp_path: Path) -> None:
+    # Seed two snapshots: 2026-05-19 and 2026-05-20.
+    csv_path = tmp_path / "h.csv"
+    csv_path.write_text(
+        "account_id,symbol,quantity,as_of_date,mark_price\n"
+        "U1,AAPL,100,2026-05-19,195.0\n"
+    )
+    runner.invoke(app, ["holdings", "import-csv", "--file", str(csv_path)])
+    csv_path.write_text(
+        "account_id,symbol,quantity,as_of_date,mark_price\n"
+        "U1,AAPL,100,2026-05-20,200.0\n"
+        "U1,MSFT,50,2026-05-20,310.0\n"
+    )
+    runner.invoke(app, ["holdings", "import-csv", "--file", str(csv_path)])
+
+    result = runner.invoke(app, ["holdings", "list"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 2  # AAPL latest (2026-05-20) + MSFT
+    # AAPL row should be the newer one (mark 200, not 195)
+    aapl = next(h for h in data["holdings"] if h["symbol"] == "AAPL")
+    assert aapl["as_of_date"] == "2026-05-20"
+    assert aapl["mark_price"] == 200.0
+
+
+def test_holdings_list_filter_by_account(memory_db, tmp_path: Path) -> None:
+    csv_path = tmp_path / "h.csv"
+    csv_path.write_text(
+        "account_id,symbol,quantity,as_of_date\n"
+        "U1,AAPL,100,2026-05-20\n"
+        "U2,MSFT,50,2026-05-20\n"
+    )
+    runner.invoke(app, ["holdings", "import-csv", "--file", str(csv_path)])
+
+    result = runner.invoke(app, ["holdings", "list", "--account", "U1"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 1
+    assert data["holdings"][0]["account_id"] == "U1"
+
+
+def test_holdings_history(memory_db, tmp_path: Path) -> None:
+    for i, qty in enumerate([90, 100, 110]):
+        csv_path = tmp_path / "h.csv"
+        csv_path.write_text(
+            "account_id,symbol,quantity,as_of_date\n"
+            f"U1,AAPL,{qty},2026-05-{18 + i}\n"
+        )
+        runner.invoke(app, ["holdings", "import-csv", "--file", str(csv_path)])
+
+    result = runner.invoke(app, ["holdings", "history", "--symbol", "AAPL"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 3
+    # newest first
+    assert [h["as_of_date"] for h in data["history"]] == [
+        "2026-05-20",
+        "2026-05-19",
+        "2026-05-18",
+    ]
+
+
+def test_holdings_sync_missing_token(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = None
+    fake_settings.flex_query_id_live = "1440609"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["holdings", "sync"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "missing_flex_token"
+
+
+def test_holdings_sync_missing_query_id(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = "secret"
+    fake_settings.flex_query_id_live = None
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["holdings", "sync"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "missing_flex_query_id"
+
+
+def test_holdings_sync_happy_path(memory_db, monkeypatch) -> None:
+    """Full happy path with FlexClient mocked at the class level."""
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = "secret"
+    fake_settings.flex_query_id_live = "1440609"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+
+    from quant_researcher.holdings.ibkr_flex import FlexStatementMeta
+
+    fake_flex = MagicMock()
+    fake_flex.__enter__.return_value = fake_flex
+    fake_flex.__exit__.return_value = None
+    fake_flex.fetch_positions.return_value = (
+        FlexStatementMeta(
+            account_id="U16781493",
+            from_date="20260520",
+            to_date="20260520",
+            when_generated="20260521;092516",
+            query_name="Live",
+        ),
+        [
+            {
+                "accountId": "U16781493",
+                "symbol": "AAPL",
+                "reportDate": "20260520",
+                "assetCategory": "STK",
+                "subCategory": "COMMON",
+                "position": "1",
+                "markPrice": "302.25",
+                "positionValue": "302.25",
+                "costBasisPrice": "261.95",
+                "costBasisMoney": "261.95",
+                "fifoPnlUnrealized": "40.3",
+                "percentOfNAV": "0.26",
+                "side": "Long",
+                "currency": "USD",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "quant_researcher.holdings.ibkr_flex.FlexClient", lambda **_: fake_flex
+    )
+
+    result = runner.invoke(app, ["holdings", "sync"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["source"] == "flex"
+    assert data["imported"] == 1
+    assert data["symbols"] == ["AAPL"]
+    assert data["account_id"] == "U16781493"
+    assert data["statement"]["query_name"] == "Live"
+
+
 def test_data_refresh_all_scope_covers_every_table(memory_db, data_env) -> None:
     _seed_universe(memory_db, ["AAPL"])
     data_env.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}
