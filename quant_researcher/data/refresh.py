@@ -21,6 +21,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from quant_researcher.data.fmp import FMPClient, FMPError
+from quant_researcher.data.freshness import stale_symbols
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.prices import DailyPrice
@@ -63,9 +64,20 @@ class RefreshResult:
 
 
 def refresh_profile(
-    session: Session, client: FMPClient, symbols: list[str]
+    session: Session,
+    client: FMPClient,
+    symbols: list[str],
+    *,
+    only_stale: bool = True,
 ) -> RefreshResult:
-    """Refresh `profiles` for each symbol. Latest FMP payload overwrites the row."""
+    """Refresh `profiles` for each symbol. Latest FMP payload overwrites the row.
+
+    When `only_stale=True` (the default since MA-4), the symbol list is first
+    narrowed by `stale_symbols(...)` so fresh rows skip the FMP call entirely.
+    Pass `only_stale=False` (CLI: `--force`) to fetch every requested symbol.
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "profile", symbols)
     outcomes: list[SymbolOutcome] = []
     for sym in symbols:
         try:
@@ -110,8 +122,15 @@ def refresh_quotes(
     symbols: list[str],
     *,
     lookback_days: int = 730,
+    only_stale: bool = True,
 ) -> RefreshResult:
-    """Append-only refresh of `daily_prices` per symbol."""
+    """Append-only refresh of `daily_prices` per symbol.
+
+    `only_stale=True` (default since MA-4) narrows `symbols` via
+    `stale_symbols("quote", ...)` before any FMP call.
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "quote", symbols)
     outcomes: list[SymbolOutcome] = []
     today = date.today()
     for sym in symbols:
@@ -189,6 +208,7 @@ def refresh_financials(
     symbols: list[str],
     *,
     periods: tuple[str, ...] = _FINANCIAL_PERIODS,
+    only_stale: bool = True,
 ) -> RefreshResult:
     """Append-only refresh of income / balance / cash-flow tables.
 
@@ -196,7 +216,12 @@ def refresh_financials(
     keyed on `(symbol, period, fiscal_date)` and **`known_at` is set from FMP
     `acceptedDate`** (D6 strict). Per-period errors are isolated; a 5xx on
     quarterly doesn't block annual for the same symbol.
+
+    `only_stale=True` (default since MA-4) narrows `symbols` via the
+    `financials` staleness rule (`MAX(fiscal_date) > 100d ago`).
     """
+    if only_stale:
+        symbols = stale_symbols(session, "financials", symbols)
     outcomes: list[SymbolOutcome] = []
     for sym in symbols:
         upserted = 0
@@ -342,8 +367,15 @@ def refresh_ratios(
     symbols: list[str],
     *,
     periods: tuple[str, ...] = _FINANCIAL_PERIODS,
+    only_stale: bool = True,
 ) -> RefreshResult:
-    """Refresh `financial_ratios` per (symbol, period). `known_at` = now(UTC)."""
+    """Refresh `financial_ratios` per (symbol, period). `known_at` = now(UTC).
+
+    `only_stale=True` (default since MA-4) narrows `symbols` via the `ratios`
+    threshold (`MAX(known_at) > 100d ago`).
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "ratios", symbols)
     outcomes: list[SymbolOutcome] = []
     for sym in symbols:
         upserted = 0
@@ -406,8 +438,15 @@ def refresh_estimates(
     symbols: list[str],
     *,
     periods: tuple[str, ...] = _FINANCIAL_PERIODS,
+    only_stale: bool = True,
 ) -> RefreshResult:
-    """Refresh `analyst_estimates` via `session.merge` (estimates revise)."""
+    """Refresh `analyst_estimates` via `session.merge` (estimates revise).
+
+    `only_stale=True` (default since MA-4) narrows `symbols` via the
+    `estimates` threshold (`MAX(known_at) > 7d ago`).
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "estimates", symbols)
     outcomes: list[SymbolOutcome] = []
     for sym in symbols:
         upserted = 0

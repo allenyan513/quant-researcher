@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA-1/2/3 已落地(2026-05-20)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新。下一步 MA-4(`qr data freshness` + 默认只刷陈旧行)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA-1/2/3/4 已落地(2026-05-20)。** 目前可用能力:数据库脚手架、Watchlist 管理、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 分析师一致预期的刷新、freshness 报告、只刷过期数据。下一步 MB(筛选 —— 衍生条件 + 技术扫描)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -41,13 +41,34 @@ cp config/watchlist.sample.txt config/watchlist.txt     # 自定义关注池
 uv run qr universe set --file config/watchlist.txt      # 入库
 uv run qr universe list
 
-uv run qr data refresh --scope profile                  # 拉每票档案
-uv run qr data refresh --scope quote --lookback-days 730  # 拉两年 OHLCV
-uv run qr data refresh --scope financials               # 拉三大报表 (annual + quarter)
-uv run qr data refresh --scope all                      # 全跑 (5 个 scope)
+uv run qr data refresh --scope all                      # 首次:全 missing → 全刷
+uv run qr data freshness                                # 看每 scope 哪些票过期/缺失
+uv run qr data refresh --scope all                      # 第二次:fresh 自动跳过
+uv run qr data refresh --scope profile --force          # 强制全刷某 scope
 ```
 
 如果你的 FMP 订阅不含某 endpoint 的季度数据,加 `--periods annual` 跳过 quarter。
+
+### 新鲜度与刷新(MA-4)
+
+`qr data refresh` **默认只刷"过期或缺失"** 的票,不再无脑全刷(MA-3 之前的行为)。每个 scope 有硬编码阈值:
+
+| Scope | 阈值 | 判定字段 |
+|---|---|---|
+| profile | 30 天 | `known_at` |
+| quote | 3 天 | `trade_date` |
+| financials | 100 天 | `fiscal_date`(看"新季度落地了没") |
+| ratios | 100 天 | `known_at` |
+| estimates | 7 天 | `known_at` |
+
+`qr data freshness` 输出每 scope 的 `{total, fresh, stale, missing, stale_symbols}`,Claude 可以这样自动驱动刷新:
+
+```bash
+STALE=$(uv run qr data freshness --scope quote | jq -r '.data.scopes.quote.stale_symbols | join(",")')
+[ -n "$STALE" ] && uv run qr data refresh --scope quote --symbols "$STALE"
+```
+
+要强制刷新所有票(不管 fresh),加 `--force`。阈值定义在 [`quant_researcher/data/freshness.py`](quant_researcher/data/freshness.py)。
 
 ## 命令速查
 
@@ -58,10 +79,12 @@ uv run qr data refresh --scope all                      # 全跑 (5 个 scope)
 | `qr db status` | 显示 server_version、expected/present/missing 表 |
 | `qr universe set --file PATH` | 用文件替换 universe 表 + upsert securities |
 | `qr universe list [--limit N]` | 打印当前 universe |
-| `qr data refresh --scope <X>` | `X ∈ {profile, quote, financials, ratios, estimates, all}` |
+| `qr data refresh --scope <X>` | `X ∈ {profile, quote, financials, ratios, estimates, all}`;**默认只刷过期/缺失** |
+| `qr data refresh ... --force` | 关掉 freshness filter,强制全刷 |
 | `qr data refresh ... --symbols A,B,C` | 限定子集(默认全 universe) |
 | `qr data refresh ... --periods annual,quarter` | 财报/比率/估计的 period 过滤 |
 | `qr data refresh ... --lookback-days N` | 新票首次拉 OHLCV 的窗口(默认 730) |
+| `qr data freshness [--scope X] [--symbols A,B]` | 每 scope 的过期/缺失报告;Claude 拿 `stale_symbols` 直接喂 refresh |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -116,12 +139,12 @@ config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
 按 D4 顺序 `A → B → C → D/E/F → G → H` 逐域扎实:
 
 - **M0** 脚手架 ✅ — uv + `qr` + JSON envelope + SQLAlchemy `Base` + `qr db status|init|ping`
-- **MA** 仓库 + 数据 (域 A) — 进行中
+- **MA** 仓库 + 数据 (域 A) ✅
   - **MA-1** ✅ — `universe` / `securities` + `qr universe set/list`
   - **MA-2** ✅ — FMP client + `profiles` / `daily_prices` + `qr data refresh --scope profile|quote`
   - **MA-3** ✅ — 财报三表 + ratios + estimates + `--scope financials|ratios|estimates`
-  - **MA-4** ⏳ — `qr data freshness` + 默认只刷陈旧行
-- **MB** 筛选(衍生条件 + 技术扫描)
+  - **MA-4** ✅ — `qr data freshness` + `qr data refresh` 默认只刷过期 + `--force`
+- **MB** 筛选(衍生条件 + 技术扫描)— **下一里程碑**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)

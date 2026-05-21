@@ -269,6 +269,16 @@ def data_refresh(
             "include the quarterly variant of those endpoints."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Refresh every requested symbol regardless of freshness. Default "
+            "(MA-4) is only-stale — fresh rows skip the FMP call. Per-scope "
+            "thresholds: profile=30d, quote=3d, financials=100d, ratios=100d, "
+            "estimates=7d."
+        ),
+    ),
 ) -> None:
     """Refresh FMP-sourced warehouse tables for the active universe.
 
@@ -279,10 +289,16 @@ def data_refresh(
     `--scope ratios`: `/ratios` rows per period (`known_at = now`).
     `--scope estimates`: forward analyst consensus (`session.merge` revises).
     `--scope all`: runs every scope in the order above.
+
+    **MA-4 breaking change**: default is now only-stale. Each scope's
+    response includes `skipped_fresh: [...]` listing symbols that already
+    had fresh enough data. Pass `--force` for the pre-MA-4 "refresh
+    everything" behavior.
     """
     from sqlalchemy import select
 
     from quant_researcher.data.fmp import FMPClient
+    from quant_researcher.data.freshness import stale_symbols
     from quant_researcher.data.refresh import (
         refresh_estimates,
         refresh_financials,
@@ -333,6 +349,13 @@ def data_refresh(
         )
 
     # Phase 2 (write): refresh inside a single transaction.
+    def _resolve(sess, scope_name: str) -> tuple[list[str], list[str]]:
+        """Return (effective_targets, skipped_fresh). `force` bypasses the filter."""
+        if force:
+            return targets, []
+        stale = stale_symbols(sess, scope_name, targets)
+        return stale, sorted(set(targets) - set(stale))
+
     try:
         scopes_out: dict[str, dict] = {}
         with (
@@ -341,43 +364,61 @@ def data_refresh(
             FMPClient(api_key=cfg.fmp_api_key) as client,
         ):
             if scope in ("profile", "all"):
-                r = refresh_profile(sess, client, targets)
+                effective, skipped = _resolve(sess, "profile")
+                r = refresh_profile(sess, client, effective, only_stale=False)
                 scopes_out["profile"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
+                    "skipped_fresh": skipped,
                 }
             if scope in ("quote", "all"):
-                r = refresh_quotes(sess, client, targets, lookback_days=lookback_days)
+                effective, skipped = _resolve(sess, "quote")
+                r = refresh_quotes(
+                    sess, client, effective, lookback_days=lookback_days, only_stale=False
+                )
                 scopes_out["quote"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
                 }
             if scope in ("financials", "all"):
-                r = refresh_financials(sess, client, targets, periods=parsed_periods)
+                effective, skipped = _resolve(sess, "financials")
+                r = refresh_financials(
+                    sess, client, effective, periods=parsed_periods, only_stale=False
+                )
                 scopes_out["financials"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
                 }
             if scope in ("ratios", "all"):
-                r = refresh_ratios(sess, client, targets, periods=parsed_periods)
+                effective, skipped = _resolve(sess, "ratios")
+                r = refresh_ratios(
+                    sess, client, effective, periods=parsed_periods, only_stale=False
+                )
                 scopes_out["ratios"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
                 }
             if scope in ("estimates", "all"):
-                r = refresh_estimates(sess, client, targets, periods=parsed_periods)
+                effective, skipped = _resolve(sess, "estimates")
+                r = refresh_estimates(
+                    sess, client, effective, periods=parsed_periods, only_stale=False
+                )
                 scopes_out["estimates"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
                 }
     except Exception as exc:
         _emit(Envelope.failure("data_refresh_failed", str(exc)))
@@ -386,12 +427,98 @@ def data_refresh(
             Envelope.success(
                 data={
                     "scope": scope,
+                    "force": force,
                     "periods": list(parsed_periods),
                     "universe_size": len(targets),
                     "symbols_processed": targets,
                     "scopes": scopes_out,
                 },
                 data_freshness={"fmp": "live"},
+            )
+        )
+
+
+@data_app.command("freshness")
+def data_freshness(
+    scope: str = typer.Option(
+        "all",
+        "--scope",
+        "-s",
+        help=(
+            "Restrict the report to one scope. One of: profile, quote, "
+            "financials, ratios, estimates, all (default)."
+        ),
+    ),
+    symbols: str | None = typer.Option(
+        None,
+        "--symbols",
+        help="Comma-separated subset of the universe (default: all universe rows).",
+    ),
+) -> None:
+    """Per-scope freshness report.
+
+    Returns counts + a `stale_symbols` action list per scope. Claude can pipe
+    `data.scopes.<scope>.stale_symbols` straight into
+    `qr data refresh --scope <scope> --symbols ...` to refresh only what's
+    out of date. Hardcoded thresholds (MA-4): profile=30d, quote=3d,
+    financials=100d, ratios=100d, estimates=7d.
+    """
+    from sqlalchemy import select
+
+    from quant_researcher.data.freshness import (
+        SCOPE_THRESHOLDS,
+        check_freshness,
+    )
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.universe import UniverseMember
+
+    valid = (*SCOPE_THRESHOLDS.keys(), "all")
+    if scope not in valid:
+        _emit(
+            Envelope.failure(
+                "invalid_scope", f"--scope must be one of {valid}, got {scope!r}"
+            )
+        )
+
+    with session_factory()() as sess:
+        if symbols:
+            targets = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        else:
+            targets = sorted(sess.scalars(select(UniverseMember.symbol)))
+    if not targets:
+        _emit(
+            Envelope.failure(
+                "empty_universe",
+                "no symbols to inspect — run `qr universe set --file …` first.",
+            )
+        )
+
+    scopes_to_check = tuple(SCOPE_THRESHOLDS.keys()) if scope == "all" else (scope,)
+    try:
+        with session_factory()() as sess:
+            report = check_freshness(sess, targets, scopes=scopes_to_check)
+    except Exception as exc:
+        _emit(Envelope.failure("data_freshness_failed", str(exc)))
+    else:
+        scopes_out = {
+            name: {
+                "total": sf.total,
+                "fresh": len(sf.fresh),
+                "stale": len(sf.stale),
+                "missing": len(sf.missing),
+                "threshold_days": sf.threshold_days,
+                "stale_symbols": sf.needs_refresh,
+            }
+            for name, sf in report.scopes.items()
+        }
+        _emit(
+            Envelope.success(
+                data={
+                    "scope": scope,
+                    "universe_size": len(targets),
+                    "scopes": scopes_out,
+                },
+                data_freshness={"db": "live"},
             )
         )
 
