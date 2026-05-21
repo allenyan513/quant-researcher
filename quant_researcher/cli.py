@@ -64,6 +64,13 @@ research_app = typer.Typer(
 )
 app.add_typer(research_app)
 
+ledger_app = typer.Typer(
+    name="ledger",
+    help="Decision ledger (MF) — record / track / scorecard.",
+    no_args_is_help=True,
+)
+app.add_typer(ledger_app)
+
 # ---------------------------------------------------------------------------
 # qr holdings ...
 # ---------------------------------------------------------------------------
@@ -538,6 +545,292 @@ def research_show(
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                     "code_version": row.code_version,
                     "payload": row.payload,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# qr ledger ...
+# ---------------------------------------------------------------------------
+
+
+@ledger_app.command("add")
+def ledger_add(
+    symbol: str = typer.Argument(..., help="Ticker the decision is about."),
+    side: str = typer.Option(..., "--side", help="`buy` or `sell`."),
+    thesis: str | None = typer.Option(
+        None, "--thesis", help="Free-text thesis / reason for the decision."
+    ),
+    confidence: int | None = typer.Option(
+        None, "--confidence", "-c", help="1–5 (or any int) confidence score."
+    ),
+    tags: str | None = typer.Option(
+        None,
+        "--tags",
+        help="Comma-separated tags, e.g. 'AI,growth,catalyst-q4'.",
+    ),
+    opened: str | None = typer.Option(
+        None,
+        "--opened",
+        help="Override decision date (YYYY-MM-DD). Defaults to today.",
+    ),
+    no_bundle: bool = typer.Option(
+        False,
+        "--no-bundle",
+        help="Skip auto-snapshotting research_bundle (faster, less reproducible).",
+    ),
+) -> None:
+    """Record a buy/sell decision with thesis + confidence + auto-snapshot."""
+    from datetime import date as _date
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.ledger.engine import record_decision
+
+    parsed_opened: _date | None = None
+    if opened:
+        try:
+            parsed_opened = _date.fromisoformat(opened)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_opened",
+                    f"--opened must be YYYY-MM-DD, got {opened!r}",
+                )
+            )
+
+    tag_list = (
+        [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    )
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = record_decision(
+                sess,
+                symbol=symbol.upper(),
+                side=side,
+                thesis=thesis,
+                confidence=confidence,
+                tags=tag_list,
+                opened_at=parsed_opened,
+                auto_bundle=not no_bundle,
+            )
+    except ValueError as exc:
+        _emit(Envelope.failure("invalid_decision", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("ledger_add_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "decision_id": result.decision_id,
+                    "bundle_id": result.bundle_id,
+                    "symbol": symbol.upper(),
+                    "side": side,
+                    "price_at_open": result.price_at_open,
+                    "sector_at_open": result.sector_at_open,
+                    "confidence": confidence,
+                    "tags": tag_list,
+                },
+                data_freshness={"warehouse": "live"},
+            )
+        )
+
+
+@ledger_app.command("track")
+def ledger_track(
+    as_of: str | None = typer.Option(
+        None,
+        "--as-of",
+        help="Override 'today' (YYYY-MM-DD) when computing horizons.",
+    ),
+    decision_id: str | None = typer.Option(
+        None, "--decision-id", help="Limit tracking to one decision."
+    ),
+) -> None:
+    """Refresh 1w/1m/3m/6m forward returns for every Decision row."""
+    from datetime import date as _date
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.ledger.engine import track_decisions
+
+    parsed_as_of: _date | None = None
+    if as_of:
+        try:
+            parsed_as_of = _date.fromisoformat(as_of)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_as_of",
+                    f"--as-of must be YYYY-MM-DD, got {as_of!r}",
+                )
+            )
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = track_decisions(
+                sess,
+                as_of=parsed_as_of,
+                decision_ids=[decision_id] if decision_id else None,
+            )
+    except Exception as exc:
+        _emit(Envelope.failure("ledger_track_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "decisions_touched": result.decisions_touched,
+                    "rows_written": result.rows_written,
+                    "rows_skipped_horizon_not_elapsed": result.rows_skipped_horizon_not_elapsed,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@ledger_app.command("list")
+def ledger_list(
+    symbol: str | None = typer.Option(
+        None, "--symbol", "-s", help="Filter to a ticker."
+    ),
+    side: str | None = typer.Option(
+        None, "--side", help="`buy` or `sell` filter."
+    ),
+    limit: int = typer.Option(50, "--limit", "-l", help="Newest-first row cap."),
+) -> None:
+    """List recorded decisions (newest first)."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.decisions import Decision
+
+    try:
+        with session_factory()() as sess:
+            stmt = select(Decision).order_by(Decision.created_at.desc()).limit(limit)
+            if symbol:
+                stmt = stmt.where(Decision.symbol == symbol.upper())
+            if side:
+                stmt = stmt.where(Decision.side == side)
+            rows = list(sess.scalars(stmt))
+            items = [
+                {
+                    "decision_id": d.decision_id,
+                    "symbol": d.symbol,
+                    "side": d.side,
+                    "opened_at": d.opened_at.isoformat() if d.opened_at else None,
+                    "price_at_open": d.price_at_open,
+                    "confidence": d.confidence,
+                    "tags": d.tags,
+                    "sector_at_open": d.sector_at_open,
+                    "thesis": d.thesis,
+                    "bundle_id": d.bundle_id,
+                }
+                for d in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("ledger_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "decisions": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@ledger_app.command("scorecard")
+def ledger_scorecard(
+    group_by: str = typer.Option(
+        "confidence",
+        "--group-by",
+        "-g",
+        help="One of: confidence, sector, tag.",
+    ),
+    horizon: str = typer.Option(
+        "1m", "--horizon", help="One of: 1w, 1m, 3m, 6m."
+    ),
+) -> None:
+    """Aggregate decisions by dimension + show avg alpha / return."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.ledger.engine import scorecard
+
+    try:
+        with session_factory()() as sess:
+            rows = scorecard(sess, group_by=group_by, horizon=horizon)
+    except ValueError as exc:
+        _emit(Envelope.failure("invalid_scorecard_param", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("ledger_scorecard_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "group_by": group_by,
+                    "horizon": horizon,
+                    "rows": rows,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@ledger_app.command("show")
+def ledger_show(
+    decision_id: str = typer.Argument(..., help="Decision UUID."),
+) -> None:
+    """Show one decision + its tracking rows."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.decisions import Decision, DecisionTracking
+
+    try:
+        with session_factory()() as sess:
+            d = sess.get(Decision, decision_id)
+            if d is None:
+                _emit(
+                    Envelope.failure(
+                        "decision_not_found",
+                        f"no decision with id={decision_id!r}",
+                    )
+                )
+            tracking = list(
+                sess.scalars(
+                    select(DecisionTracking)
+                    .where(DecisionTracking.decision_id == decision_id)
+                    .order_by(DecisionTracking.horizon)
+                )
+            )
+    except Exception as exc:
+        _emit(Envelope.failure("ledger_show_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "decision_id": d.decision_id,
+                    "symbol": d.symbol,
+                    "side": d.side,
+                    "opened_at": d.opened_at.isoformat(),
+                    "price_at_open": d.price_at_open,
+                    "confidence": d.confidence,
+                    "tags": d.tags,
+                    "sector_at_open": d.sector_at_open,
+                    "thesis": d.thesis,
+                    "bundle_id": d.bundle_id,
+                    "tracking": [
+                        {
+                            "horizon": t.horizon,
+                            "tracked_at": t.tracked_at.isoformat() if t.tracked_at else None,
+                            "price": t.price,
+                            "return_pct": t.return_pct,
+                            "spy_return_pct": t.spy_return_pct,
+                            "sector_etf": t.sector_etf,
+                            "sector_return_pct": t.sector_return_pct,
+                            "alpha_pct": t.alpha_pct,
+                        }
+                        for t in tracking
+                    ],
                 },
                 data_freshness={"db": "live"},
             )

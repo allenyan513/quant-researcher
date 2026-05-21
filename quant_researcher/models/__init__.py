@@ -8,11 +8,13 @@ column changes are picked up by re-running `qr db init`.
 MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 `income_statement`, `balance_sheet`, `cash_flow`, `financial_ratios`,
 `analyst_estimates`. MB: `screens`, `screen_runs`. MC: `valuation_snapshots`.
-ME: `holdings`. MD: `news_items`, `research_bundles`.
+ME: `holdings`. MD: `news_items`, `research_bundles`. MF: `decisions`,
+`decision_tracking`.
 """
 
 from __future__ import annotations
 
+from quant_researcher.models.decisions import Decision, DecisionTracking
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.holdings import Holding
@@ -30,6 +32,8 @@ __all__ = [
     "BalanceSheet",
     "CashFlow",
     "DailyPrice",
+    "Decision",
+    "DecisionTracking",
     "FinancialRatios",
     "Holding",
     "IncomeStatement",

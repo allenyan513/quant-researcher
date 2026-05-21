@@ -323,3 +323,48 @@ def test_research_bundles_table_shape() -> None:
         "created_at",
     }
     assert [c.name for c in t.primary_key.columns] == ["bundle_id"]
+
+
+def test_metadata_includes_mf_tables() -> None:
+    tables = set(Base.metadata.tables.keys())
+    assert "decisions" in tables
+    assert "decision_tracking" in tables
+
+
+def test_decisions_table_shape() -> None:
+    t = Base.metadata.tables["decisions"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "decision_id",
+        "symbol",
+        "side",
+        "opened_at",
+        "price_at_open",
+        "thesis",
+        "confidence",
+        "tags",
+        "sector_at_open",
+        "bundle_id",
+        "code_version",
+        "created_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["decision_id"]
+
+
+def test_decision_tracking_table_shape() -> None:
+    t = Base.metadata.tables["decision_tracking"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "decision_id",
+        "horizon",
+        "tracked_at",
+        "price",
+        "return_pct",
+        "spy_return_pct",
+        "sector_etf",
+        "sector_return_pct",
+        "alpha_pct",
+        "extras",
+        "updated_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["decision_id", "horizon"]

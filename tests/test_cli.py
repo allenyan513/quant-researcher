@@ -1104,6 +1104,116 @@ def test_research_show_not_found(memory_db) -> None:
     assert _json_lines(result.output)[0]["error"]["code"] == "bundle_not_found"
 
 
+# ----- MF: qr ledger -------------------------------------------------------
+
+
+def test_ledger_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["ledger", "--help"])
+    assert result.exit_code == 0
+    for sub in ("add", "track", "list", "scorecard", "show"):
+        assert sub in result.output
+
+
+def test_ledger_add_records_decision(memory_db) -> None:
+    from datetime import UTC, date, datetime
+
+    from quant_researcher.models.prices import DailyPrice
+    from quant_researcher.models.profile import Profile
+
+    with memory_db() as sess:
+        sess.add(
+            Profile(symbol="AAPL", sector="Technology", raw={}, known_at=datetime.now(UTC))
+        )
+        sess.add(DailyPrice(symbol="AAPL", trade_date=date.today(), close=200.0))
+        sess.commit()
+
+    result = runner.invoke(
+        app,
+        [
+            "ledger",
+            "add",
+            "AAPL",
+            "--side",
+            "buy",
+            "--thesis",
+            "growth",
+            "--confidence",
+            "4",
+            "--tags",
+            "AI,tech",
+        ],
+    )
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["decision_id"]
+    assert data["bundle_id"]
+    assert data["symbol"] == "AAPL"
+    assert data["side"] == "buy"
+    assert data["price_at_open"] == 200.0
+    assert data["sector_at_open"] == "Technology"
+    assert data["tags"] == ["AI", "tech"]
+
+
+def test_ledger_add_rejects_bad_side(memory_db) -> None:
+    result = runner.invoke(app, ["ledger", "add", "AAPL", "--side", "hodl"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "invalid_decision"
+
+
+def test_ledger_add_invalid_opened(memory_db) -> None:
+    result = runner.invoke(
+        app, ["ledger", "add", "AAPL", "--side", "buy", "--opened", "bad-date"]
+    )
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "invalid_opened"
+
+
+def test_ledger_list_filter(memory_db) -> None:
+    from datetime import UTC, date, datetime
+
+    from quant_researcher.models.prices import DailyPrice
+    from quant_researcher.models.profile import Profile
+
+    with memory_db() as sess:
+        sess.add(
+            Profile(symbol="AAPL", sector="Tech", raw={}, known_at=datetime.now(UTC))
+        )
+        sess.add(DailyPrice(symbol="AAPL", trade_date=date.today(), close=200.0))
+        sess.commit()
+    runner.invoke(app, ["ledger", "add", "AAPL", "--side", "buy", "--no-bundle"])
+    runner.invoke(app, ["ledger", "add", "AAPL", "--side", "sell", "--no-bundle"])
+
+    result = runner.invoke(app, ["ledger", "list", "--side", "buy"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 1
+    assert data["decisions"][0]["side"] == "buy"
+
+
+def test_ledger_scorecard_invalid_group_by(memory_db) -> None:
+    result = runner.invoke(app, ["ledger", "scorecard", "--group-by", "junk"])
+    assert result.exit_code == 1
+    assert (
+        _json_lines(result.output)[0]["error"]["code"]
+        == "invalid_scorecard_param"
+    )
+
+
+def test_ledger_show_not_found(memory_db) -> None:
+    result = runner.invoke(app, ["ledger", "show", "nope-id"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "decision_not_found"
+
+
+def test_ledger_track_no_decisions(memory_db) -> None:
+    result = runner.invoke(app, ["ledger", "track"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["decisions_touched"] == 0
+
+
 def test_holdings_sync_happy_path(memory_db, monkeypatch) -> None:
     """Full happy path with FlexClient mocked at the class level."""
     fake_settings = MagicMock()
