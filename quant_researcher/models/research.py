@@ -32,7 +32,7 @@ class NewsItem(Base):
     headline: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str | None] = mapped_column(String(128))
     summary: Mapped[str | None] = mapped_column(Text)
-    image_url: Mapped[str | None] = mapped_column(String(512))
+    image_url: Mapped[str | None] = mapped_column(String(1024))
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     known_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

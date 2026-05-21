@@ -253,7 +253,7 @@ def test_get_news_happy_path(client: FMPClient) -> None:
             "site": "Bloomberg",
         }
     ]
-    respx.get(f"{BASE}/news/stock-latest").mock(
+    respx.get(f"{BASE}/news/stock").mock(
         return_value=httpx.Response(200, json=payload)
     )
     assert client.get_news(["AAPL", "MSFT"]) == payload
@@ -261,7 +261,7 @@ def test_get_news_happy_path(client: FMPClient) -> None:
 
 @respx.mock
 def test_get_news_passes_symbols_and_limit(client: FMPClient) -> None:
-    route = respx.get(f"{BASE}/news/stock-latest").mock(
+    route = respx.get(f"{BASE}/news/stock").mock(
         return_value=httpx.Response(200, json=[])
     )
     client.get_news(["AAPL", "MSFT"], limit=10)
@@ -272,7 +272,7 @@ def test_get_news_passes_symbols_and_limit(client: FMPClient) -> None:
 
 @respx.mock
 def test_get_news_returns_empty_on_402(client: FMPClient) -> None:
-    respx.get(f"{BASE}/news/stock-latest").mock(
+    respx.get(f"{BASE}/news/stock").mock(
         return_value=httpx.Response(402, text="Premium endpoint")
     )
     assert client.get_news("AAPL") == []

@@ -371,6 +371,13 @@ def refresh_ratios(
 ) -> RefreshResult:
     """Refresh `financial_ratios` per (symbol, period). `known_at` = now(UTC).
 
+    Uses `session.merge` (not `_ingest_statement`'s insert-only path) because
+    ratios are **derived** from price + financials — FMP recomputes them
+    whenever the market price moves, so an existing `(symbol, period,
+    fiscal_date)` row should refresh with the new values rather than be
+    skipped as a duplicate. Statements (income/balance/cashflow) stay
+    insert-only because filed reports are immutable.
+
     `only_stale=True` (default since MA-4) narrows `symbols` via the `ratios`
     threshold (`MAX(known_at) > 100d ago`).
     """
@@ -379,7 +386,6 @@ def refresh_ratios(
     outcomes: list[SymbolOutcome] = []
     for sym in symbols:
         upserted = 0
-        skipped = 0
         errs: list[str] = []
         for period in periods:
             try:
@@ -387,15 +393,18 @@ def refresh_ratios(
             except FMPError as exc:
                 errs.append(f"{period}: {exc}")
                 continue
-            u, s = _ingest_statement(session, sym, FinancialRatios, rows, _ratio_from_fmp)
-            upserted += u
-            skipped += s
+            for raw in rows:
+                mapped = _ratio_from_fmp(sym, raw)
+                if mapped["fiscal_date"] is None or not mapped["period"]:
+                    continue
+                session.merge(FinancialRatios(**mapped))
+                upserted += 1
         outcomes.append(
             SymbolOutcome(
                 sym,
                 ok=not errs,
                 upserted=upserted,
-                skipped=skipped,
+                skipped=0,
                 error="; ".join(errs) if errs else None,
             )
         )
@@ -403,27 +412,57 @@ def refresh_ratios(
 
 
 def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
+    """Map FMP `/ratios` payload to FinancialRatios columns.
+
+    Field names verified against real FMP /ratios response 2026-05-21. Some
+    metrics FMP /ratios doesn't return at all (ROE/ROA, fcf_yield) — those
+    live in `/key-metrics` instead; left as None here and computed
+    on-the-fly from income+balance/market_cap if/when needed (TODO).
+    """
     return {
         "symbol": symbol,
         "period": row.get("period") or None,
         "fiscal_date": _as_date(row.get("date")),
-        "pe_ratio": _as_float(row.get("priceEarningsRatio") or row.get("peRatio")),
-        "peg_ratio": _as_float(row.get("priceEarningsToGrowthRatio") or row.get("pegRatio")),
+        # FMP uses priceToEarningsRatio (not priceEarningsRatio).
+        "pe_ratio": _as_float(
+            row.get("priceToEarningsRatio")
+            or row.get("priceEarningsRatio")
+            or row.get("peRatio")
+        ),
+        "peg_ratio": _as_float(
+            row.get("priceToEarningsGrowthRatio")
+            or row.get("forwardPriceToEarningsGrowthRatio")
+            or row.get("pegRatio")
+        ),
         "price_to_book": _as_float(row.get("priceToBookRatio") or row.get("pbRatio")),
         "price_to_sales": _as_float(row.get("priceToSalesRatio")),
+        # FMP returns `enterpriseValueMultiple` as the EV/EBITDA-style metric.
         "ev_to_ebitda": _as_float(
-            row.get("enterpriseValueOverEBITDA") or row.get("evToEbitda")
+            row.get("enterpriseValueMultiple")
+            or row.get("enterpriseValueOverEBITDA")
+            or row.get("evToEbitda")
         ),
-        "ev_to_sales": _as_float(row.get("evToSales") or row.get("enterpriseValueMultiple")),
+        "ev_to_sales": _as_float(row.get("evToSales")),
         "current_ratio": _as_float(row.get("currentRatio")),
-        "debt_to_equity": _as_float(row.get("debtEquityRatio") or row.get("debtToEquity")),
+        "debt_to_equity": _as_float(
+            row.get("debtToEquityRatio")
+            or row.get("debtEquityRatio")
+            or row.get("debtToEquity")
+        ),
+        # FMP /ratios doesn't expose ROE/ROA directly — these stay None.
+        # Derived from income / balance when needed: ROE = net_income/equity.
         "return_on_equity": _as_float(row.get("returnOnEquity")),
         "return_on_assets": _as_float(row.get("returnOnAssets")),
         "gross_margin": _as_float(row.get("grossProfitMargin")),
         "operating_margin": _as_float(row.get("operatingProfitMargin")),
-        "net_margin": _as_float(row.get("netProfitMargin")),
+        "net_margin": _as_float(
+            row.get("netProfitMargin") or row.get("bottomLineProfitMargin")
+        ),
+        # FMP /ratios has no fcf_yield. Compute from /key-metrics later.
         "fcf_yield": _as_float(row.get("freeCashFlowYield")),
-        "payout_ratio": _as_float(row.get("payoutRatio") or row.get("dividendPayoutRatio")),
+        "payout_ratio": _as_float(
+            row.get("dividendPayoutRatio") or row.get("payoutRatio")
+        ),
         "raw": row,
         "known_at": datetime.now(UTC),
     }

@@ -107,6 +107,10 @@ def _profile_section(session: Session, symbol: str) -> dict[str, Any] | None:
     p = session.get(Profile, symbol)
     if p is None:
         return None
+    raw = p.raw or {}
+    # FMP /profile uses `marketCap` in /stable; older docs say `mktCap`.
+    # Check both for resilience.
+    market_cap = raw.get("marketCap") or raw.get("mktCap") or raw.get("MktCap")
     return {
         "company_name": p.company_name,
         "sector": p.sector,
@@ -120,7 +124,7 @@ def _profile_section(session: Session, symbol: str) -> dict[str, Any] | None:
         "is_fund": p.is_fund,
         "is_adr": p.is_adr,
         "is_actively_trading": p.is_actively_trading,
-        "market_cap": (p.raw or {}).get("mktCap") if p.raw else None,
+        "market_cap": market_cap,
     }
 
 

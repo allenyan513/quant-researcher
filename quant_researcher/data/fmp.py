@@ -134,13 +134,17 @@ class FMPClient:
     ) -> list[dict[str, Any]]:
         """Recent news for one or more symbols (comma-separated).
 
+        Uses `/news/stock` — `/news/stock-latest` ignores the `symbols`
+        param and returns global headlines. Verified against FMP /stable
+        2026-05-21.
+
         Returns `[]` on HTTP 402 (premium-gated on lighter plans) — MD's
         bundler treats missing news as a soft signal, not an error.
         """
         syms = ",".join(symbols) if isinstance(symbols, list) else symbols
         try:
             payload = self._get(
-                "/news/stock-latest", {"symbols": syms, "limit": limit}
+                "/news/stock", {"symbols": syms, "limit": limit}
             )
         except FMPError as exc:
             if exc.status_code == 402:
