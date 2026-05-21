@@ -532,6 +532,156 @@ def test_data_freshness_empty_universe(memory_db) -> None:
     assert payloads[0]["error"]["code"] == "empty_universe"
 
 
+# ----- MB: qr screen -------------------------------------------------------
+
+
+def _seed_profile_and_ratio(
+    memory_db_factory, symbol: str, sector: str, pe: float
+) -> None:
+    from datetime import UTC, date, datetime
+
+    from quant_researcher.models.profile import Profile
+    from quant_researcher.models.ratios import FinancialRatios
+
+    with memory_db_factory() as sess:
+        sess.add(
+            Profile(
+                symbol=symbol,
+                sector=sector,
+                raw={"mktCap": 1e12},
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.add(
+            FinancialRatios(
+                symbol=symbol,
+                period="FY",
+                fiscal_date=date(2024, 9, 30),
+                pe_ratio=pe,
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.commit()
+
+
+def test_screen_run_fundamental(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL", "MSFT"])
+    _seed_profile_and_ratio(memory_db, "AAPL", "Technology", 20.0)
+    _seed_profile_and_ratio(memory_db, "MSFT", "Technology", 40.0)
+
+    result = runner.invoke(app, ["screen", "run", "--expr", "pe < 30"])
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["matched"] == 1
+    assert data["symbols"] == ["AAPL"]
+    assert data["universe_size"] == 2
+    assert data["run_id"]
+
+
+def test_screen_run_requires_predicate(memory_db) -> None:
+    result = runner.invoke(app, ["screen", "run"])
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    assert payloads[0]["error"]["code"] == "missing_predicate"
+
+
+def test_screen_run_invalid_expression(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL"])
+    result = runner.invoke(app, ["screen", "run", "--expr", "forward_pe < 30"])
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    assert payloads[0]["error"]["code"] == "invalid_screen_spec"
+    assert "forward_pe" in payloads[0]["error"]["message"]
+
+
+def test_screen_run_invalid_technical(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL"])
+    result = runner.invoke(
+        app, ["screen", "run", "--technical", "nope[5]"]
+    )
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert payloads[0]["error"]["code"] == "invalid_screen_spec"
+
+
+def test_screen_run_saves_named_screen(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL"])
+    _seed_profile_and_ratio(memory_db, "AAPL", "Technology", 20.0)
+
+    result = runner.invoke(
+        app,
+        [
+            "screen",
+            "run",
+            "--expr",
+            "pe < 30",
+            "--name",
+            "cheap_tech",
+            "--description",
+            "PE under 30",
+        ],
+    )
+    assert result.exit_code == 0
+    list_result = runner.invoke(app, ["screen", "list"])
+    list_data = _json_lines(list_result.output)[0]["data"]
+    assert list_data["count"] == 1
+    assert list_data["screens"][0]["name"] == "cheap_tech"
+    assert list_data["screens"][0]["description"] == "PE under 30"
+
+
+def test_screen_runs_lists_history(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL"])
+    _seed_profile_and_ratio(memory_db, "AAPL", "Technology", 20.0)
+    runner.invoke(app, ["screen", "run", "--expr", "pe < 30"])
+    runner.invoke(app, ["screen", "run", "--expr", "pe < 50"])
+
+    result = runner.invoke(app, ["screen", "runs"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 2
+
+
+def test_screen_diff(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL", "MSFT"])
+    _seed_profile_and_ratio(memory_db, "AAPL", "Technology", 20.0)
+    _seed_profile_and_ratio(memory_db, "MSFT", "Technology", 40.0)
+
+    r1 = runner.invoke(app, ["screen", "run", "--expr", "pe < 30"])
+    r2 = runner.invoke(app, ["screen", "run", "--expr", "pe < 50"])
+    rid1 = _json_lines(r1.output)[0]["data"]["run_id"]
+    rid2 = _json_lines(r2.output)[0]["data"]["run_id"]
+
+    result = runner.invoke(
+        app, ["screen", "diff", "--from", rid1, "--to", rid2]
+    )
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["added"] == ["MSFT"]
+    assert data["removed"] == []
+    assert data["kept"] == ["AAPL"]
+
+
+def test_screen_diff_unknown_run() -> None:
+    result = runner.invoke(
+        app, ["screen", "diff", "--from", "nope-1", "--to", "nope-2"]
+    )
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert payloads[0]["error"]["code"] == "screen_diff_failed"
+
+
+def test_screen_fields() -> None:
+    result = runner.invoke(app, ["screen", "fields"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert "pe" in data["expression_fields"]
+    assert "macd_golden_cross" in data["technical_predicates"]
+
+
 def test_data_refresh_all_scope_covers_every_table(memory_db, data_env) -> None:
     _seed_universe(memory_db, ["AAPL"])
     data_env.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}
