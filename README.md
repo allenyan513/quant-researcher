@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA + MB + MC + ME 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 估计的刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**IBKR Flex 持仓导入 + CSV 持仓 + 历史快照**。下一步 MD(研究数据包)+ MF(决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 alpha,M0 + MA + MB + MC + ME + MD 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile / OHLCV / 三大报表 / 比率 / 估计的刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**IBKR Flex / CSV 持仓 + 历史快照**、**研究数据包(profile + financials + ratios + estimates + valuation + holdings + news 一站聚合)**。下一步 MF(决策账本)。完整路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -178,6 +178,10 @@ uv run qr holdings history --symbol AAPL --limit 30                  # 单票回
 | `qr holdings import-csv --file PATH [--account A] [--as-of YYYY-MM-DD]` | 从 CSV 导入持仓 |
 | `qr holdings list [--account A] [--as-of latest\|YYYY-MM-DD]` | 列当前持仓,默认每 (account, symbol) 取最新 |
 | `qr holdings history --symbol SYM [--account A] [--limit N]` | 单票快照历史(新→旧) |
+| `qr research bundle SYM [--no-save]` | 一站聚合 profile/financials/ratios/estimates/valuation/holdings/news → 一个 JSON,持久化到 `research_bundles` |
+| `qr research news --symbols A,B [--limit N]` | 从 FMP 拉新闻进 `news_items`(夸 plan 402 软失败) |
+| `qr research list [--symbol S] [--limit N]` | 列历史 bundle(新→旧) |
+| `qr research show BUNDLE_ID` | 看某次 bundle 的完整 payload |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -230,6 +234,9 @@ quant_researcher/
 │   ├── ibkr_flex.py   IBKR Flex Statement API client (SendRequest + 轮询 + XML 解析)
 │   ├── csv.py         parse_holdings_csv (header 校验 + 类型强转)
 │   └── importer.py    flex / csv → Holding 统一上插
+├── research/
+│   ├── bundler.py     build_bundle (DB → JSON aggregator) + bundle (持久化)
+│   └── refresh.py     refresh_news (FMP /news/stock-latest → news_items dedup)
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -240,11 +247,39 @@ quant_researcher/
     ├── estimates.py   AnalystEstimate (forward consensus)
     ├── screens.py     Screen (定义) + ScreenRun (结果快照)
     ├── valuation.py   ValuationSnapshot (一行一模型一估值)
-    └── holdings.py    Holding (PK = account+symbol+as_of_date,每天快照累加)
+    ├── holdings.py    Holding (PK = account+symbol+as_of_date,每天快照累加)
+    └── research.py    NewsItem (新闻缓存) + ResearchBundle (聚合快照)
 tests/                 pytest, in-memory SQLite + respx mock
 docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
 ```
+
+### 研究数据包(MD)
+
+一个命令把仓库里这只票的"全貌"打包成 JSON,Claude skill 直接消费、不用反复查仓库:
+
+```bash
+# 先抓点新闻(可选,FMP 某些 plan 走 402 就软失败,bundle 仍然能出)
+uv run qr data refresh --scope all --periods annual                  # 把 profile/financials/ratios/estimates 灌好
+uv run qr research news --symbols AAPL,MSFT,NVDA --limit 30          # 灌新闻
+
+# 单票深度包
+uv run qr research bundle AAPL                                       # 默认 save=True, news_limit=10
+#   envelope.data.bundle_id = UUID, .payload = 完整聚合 dict
+```
+
+bundle 包含:
+- `profile` (sector/industry/exchange/beta/market_cap)
+- `latest_price` (最新 OHLCV)
+- `ratios_latest_annual` (PE/PEG/EV/EBITDA/ROE 等 14 个)
+- `income_statement_recent` / `balance_sheet_recent` / `cash_flow_recent` (最近 5 期)
+- `estimates_forward` (未来 4 期一致预期)
+- `valuation_snapshots` (每个模型最新一条)
+- `holdings` (每账户最新持仓)
+- `news` (最近 N 条标题/url/source)
+- `transcript_excerpt` (caller 传入,留 hook)
+
+数据缺一项 bundle 不挂,该 section 是 None 或 [];可复现:`bundle_id` + `code_version` 入 `research_bundles`。
 
 ## 路线图
 
@@ -259,7 +294,8 @@ config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
 - **MB** 筛选 ✅ — AST-sandbox 表达式 + 9 个技术 predicate + `screens` / `screen_runs` + diff
 - **MC** 估值 ✅ — DCF-FCFF + Bloomberg-β WACC + PEG + 行业倍数 + 5×5 sensitivity + `valuation_snapshots`(EPV/DDM 延后)
 - **ME** 持仓 ✅ — IBKR Flex Python client + CSV importer + `holdings` 快照 + `qr holdings sync/import-csv/list/history`(morningcall 数据包延后)
-- **MD** 研究数据包 + **MF** 决策账本 — **下一里程碑**
+- **MD** 研究包 ✅ — `news_items` + `research_bundles` + `qr research bundle/news/list/show`(一站聚合所有 warehouse 数据)
+- **MF** 决策账本 — **下一里程碑**
 - **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
 - **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
 - **MG** 信号研究(因子 IC / 分位 / 衰减)

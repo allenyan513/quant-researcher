@@ -57,6 +57,13 @@ holdings_app = typer.Typer(
 )
 app.add_typer(holdings_app)
 
+research_app = typer.Typer(
+    name="research",
+    help="Research data packages (MD) — bundle aggregator + news refresh.",
+    no_args_is_help=True,
+)
+app.add_typer(research_app)
+
 # ---------------------------------------------------------------------------
 # qr holdings ...
 # ---------------------------------------------------------------------------
@@ -365,6 +372,176 @@ def _sum_floats(items: list[dict], key: str) -> float | None:
     if not vals:
         return None
     return sum(vals)
+
+
+# ---------------------------------------------------------------------------
+# qr research ...
+# ---------------------------------------------------------------------------
+
+
+@research_app.command("bundle")
+def research_bundle(
+    symbol: str = typer.Argument(..., help="Ticker to research (e.g. AAPL)."),
+    save: bool = typer.Option(
+        True, "--save/--no-save", help="Persist the bundle to research_bundles."
+    ),
+    news_limit: int = typer.Option(
+        10, "--news-limit", help="How many recent news headlines to include."
+    ),
+) -> None:
+    """Aggregate everything the warehouse knows about `symbol` into a JSON bundle.
+
+    Pulls profile + financials (income/balance/cashflow) + ratios + forward
+    estimates + valuation snapshots + holdings + recent news → single dict.
+    Missing data falls to None/[] gracefully. Returns `bundle_id` if saved.
+    """
+    from quant_researcher.db import session_factory
+    from quant_researcher.research.bundler import bundle
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            bundle_id, payload = bundle(sess, symbol.upper(), news_limit=news_limit, save=save)
+    except Exception as exc:
+        _emit(Envelope.failure("research_bundle_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "bundle_id": bundle_id,
+                    "saved": save,
+                    "payload": payload,
+                },
+                data_freshness={"warehouse": "live"},
+            )
+        )
+
+
+@research_app.command("news")
+def research_news_cmd(
+    symbols: str = typer.Option(
+        ...,
+        "--symbols",
+        help="Comma-separated tickers to fetch news for, e.g. 'AAPL,MSFT,NVDA'.",
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-l", help="FMP /news/stock-latest limit."
+    ),
+) -> None:
+    """Fetch + dedupe recent news from FMP into `news_items`."""
+    from quant_researcher.data.fmp import FMPClient
+    from quant_researcher.db import session_factory
+    from quant_researcher.research.refresh import refresh_news
+
+    cfg = settings()
+    if not cfg.fmp_api_key:
+        _emit(
+            Envelope.failure(
+                "missing_fmp_api_key", "FMP_API_KEY is not set in .env."
+            )
+        )
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not syms:
+        _emit(Envelope.failure("no_symbols", "--symbols cannot be empty."))
+
+    try:
+        with (
+            session_factory()() as sess,
+            sess.begin(),
+            FMPClient(api_key=cfg.fmp_api_key) as client,
+        ):
+            result = refresh_news(sess, client, syms, limit=limit)
+    except Exception as exc:
+        _emit(Envelope.failure("news_refresh_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "symbols_requested": syms,
+                    "fetched": result.fetched,
+                    "inserted": result.inserted,
+                    "skipped_duplicate": result.skipped_duplicate,
+                    "failed": result.failed,
+                },
+                data_freshness={"fmp": "live"},
+            )
+        )
+
+
+@research_app.command("list")
+def research_list(
+    symbol: str | None = typer.Option(
+        None, "--symbol", "-s", help="Filter to a specific ticker."
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-l", help="Newest-first row cap (default 20)."
+    ),
+) -> None:
+    """List past bundles (newest first)."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.research import ResearchBundle
+
+    try:
+        with session_factory()() as sess:
+            stmt = select(ResearchBundle).order_by(ResearchBundle.created_at.desc()).limit(limit)
+            if symbol:
+                stmt = stmt.where(ResearchBundle.symbol == symbol.upper())
+            rows = list(sess.scalars(stmt))
+            items = [
+                {
+                    "bundle_id": r.bundle_id,
+                    "symbol": r.symbol,
+                    "as_of": r.as_of.isoformat() if r.as_of else None,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "code_version": r.code_version,
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("research_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "bundles": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@research_app.command("show")
+def research_show(
+    bundle_id: str = typer.Argument(..., help="Bundle UUID from `qr research list`."),
+) -> None:
+    """Show a saved bundle by id."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.research import ResearchBundle
+
+    try:
+        with session_factory()() as sess:
+            row = sess.get(ResearchBundle, bundle_id)
+    except Exception as exc:
+        _emit(Envelope.failure("research_show_failed", str(exc)))
+    else:
+        if row is None:
+            _emit(
+                Envelope.failure(
+                    "bundle_not_found", f"no bundle with id={bundle_id!r}"
+                )
+            )
+        _emit(
+            Envelope.success(
+                data={
+                    "bundle_id": row.bundle_id,
+                    "symbol": row.symbol,
+                    "as_of": row.as_of.isoformat() if row.as_of else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "code_version": row.code_version,
+                    "payload": row.payload,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
 
 
 # `qr value` is a top-level command (not a subgroup) — implementation-plan.md

@@ -129,6 +129,50 @@ class FMPClient:
         """Return `/analyst-estimates` rows (forward-looking consensus)."""
         return self._get_period_list("/analyst-estimates", symbol, period, limit)
 
+    def get_news(
+        self, symbols: list[str] | str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Recent news for one or more symbols (comma-separated).
+
+        Returns `[]` on HTTP 402 (premium-gated on lighter plans) — MD's
+        bundler treats missing news as a soft signal, not an error.
+        """
+        syms = ",".join(symbols) if isinstance(symbols, list) else symbols
+        try:
+            payload = self._get(
+                "/news/stock-latest", {"symbols": syms, "limit": limit}
+            )
+        except FMPError as exc:
+            if exc.status_code == 402:
+                return []
+            raise
+        return payload if isinstance(payload, list) else []
+
+    def get_earnings_transcript(
+        self,
+        symbol: str,
+        *,
+        year: int | None = None,
+        quarter: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Earnings call transcript(s) — defaults to the latest available.
+
+        Returns `[]` on HTTP 402 (premium-gated). Each row typically has
+        `date`, `quarter`, `year`, `content` (the actual transcript text).
+        """
+        params: dict[str, Any] = {"symbol": symbol}
+        if year is not None:
+            params["year"] = year
+        if quarter is not None:
+            params["quarter"] = quarter
+        try:
+            payload = self._get("/earning-call-transcript", params)
+        except FMPError as exc:
+            if exc.status_code == 402:
+                return []
+            raise
+        return payload if isinstance(payload, list) else []
+
     def _get_period_list(
         self, path: str, symbol: str, period: str, limit: int | None
     ) -> list[dict[str, Any]]:

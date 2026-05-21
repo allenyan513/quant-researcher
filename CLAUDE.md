@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA + MB + MC + ME(持仓部分)已合并 master**,下一里程碑是 **MD**(研究数据包)+ **MF**(决策账本);ME 的 morningcall 数据包延后到 MD/MF 一起做。
+代码现状:**M0 + MA + MB + MC + ME(持仓部分)+ MD 已合并 master**,下一里程碑是 **MF**(决策账本)。ME 的 morningcall 数据包延后到 MF 或后续。
 
 ## 命令(运行前必看)
 
@@ -152,7 +152,17 @@ from quant_researcher import models  # noqa: E402, F401
 - Flex `reportDate` 是 `YYYYMMDD`(无连字符),`_parse_flex_date` 处理。
 - token 别提交进 repo,只走 `.env`。
 
-### 10. Per-symbol AND per-period 失败隔离
+### 10. MD 研究数据包 — bundler + news + FMP 402 软失败
+
+**bundler** ([`quant_researcher/research/bundler.py`](quant_researcher/research/bundler.py)) 是纯 DB 聚合器 —— 不调 FMP,只读 warehouse。`build_bundle(session, symbol)` 走 9 个 section helper(`_profile_section` / `_latest_price` / `_latest_ratios` / `_recent_statements` × 3 / `_forward_estimates` / `_recent_valuations` / `_holdings_section` / `_recent_news`),每个 helper 数据缺失返回 None / []。`bundle(...)` 在 build_bundle 之上加持久化到 `research_bundles`。
+
+**FMP 402 软失败** ([`quant_researcher/data/fmp.py`](quant_researcher/data/fmp.py) `get_news` / `get_earnings_transcript`):用户 plan 不包含 premium 端点时 FMP 返 402 —— 这两个方法 catch FMPError(status_code=402) 返 []。MA-3 的财报方法仍 raise,因为它们是 first-class 数据(MD 的 news 是 nice-to-have)。
+
+**news 表 dedup** ([`research/refresh.py`](quant_researcher/research/refresh.py)):PK 是 `(symbol, published_at, url)`。tuple 比对前用 `_key()` 把两边的 tz-aware datetime 都 strip 成 naive UTC,因为 SQLite 读出来的 `DateTime(timezone=True)` 列是 naive,Postgres 是 aware。
+
+**transcript_excerpt 是 caller-provided**:bundler 不主动调 FMP `/earning-call-transcript`(那个 endpoint 很大,2000 字 truncate 后还是几 K 字符)。`qr research bundle` v1 不传 transcript,留个 hook。后面如果要做 earnings-read 单独命令(`qr research earnings SYM`)再决定要不要主动拉。
+
+### 11. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)

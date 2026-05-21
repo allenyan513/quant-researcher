@@ -990,6 +990,120 @@ def test_holdings_sync_missing_query_id(memory_db, monkeypatch) -> None:
     assert _json_lines(result.output)[0]["error"]["code"] == "missing_flex_query_id"
 
 
+# ----- MD: qr research -----------------------------------------------------
+
+
+def test_research_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["research", "--help"])
+    assert result.exit_code == 0
+    for sub in ("bundle", "news", "list", "show"):
+        assert sub in result.output
+
+
+def test_research_bundle_minimal(memory_db) -> None:
+    from datetime import UTC, datetime
+
+    from quant_researcher.models.profile import Profile
+
+    with memory_db() as sess:
+        sess.add(
+            Profile(
+                symbol="AAPL",
+                sector="Technology",
+                raw={"mktCap": 3e12},
+                known_at=datetime.now(UTC),
+            )
+        )
+        sess.commit()
+
+    result = runner.invoke(app, ["research", "bundle", "AAPL"])
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["saved"] is True
+    assert data["bundle_id"]
+    assert data["payload"]["profile"]["sector"] == "Technology"
+
+
+def test_research_bundle_no_save(memory_db) -> None:
+    result = runner.invoke(app, ["research", "bundle", "GHOST", "--no-save"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["saved"] is False
+    assert data["bundle_id"] is None
+    assert data["payload"]["symbol"] == "GHOST"
+
+
+def test_research_news_missing_symbols(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.fmp_api_key = "key"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["research", "news", "--symbols", ""])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "no_symbols"
+
+
+def test_research_news_missing_api_key(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.fmp_api_key = None
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["research", "news", "--symbols", "AAPL"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "missing_fmp_api_key"
+
+
+def test_research_news_happy_path(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.fmp_api_key = "key"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+
+    fake_client = MagicMock()
+    fake_client.__enter__.return_value = fake_client
+    fake_client.__exit__.return_value = None
+    fake_client.get_news.return_value = [
+        {
+            "symbol": "AAPL",
+            "publishedDate": "2026-05-20 10:00:00",
+            "title": "Apple beats",
+            "url": "https://example.com/a",
+            "site": "Bloomberg",
+        }
+    ]
+    monkeypatch.setattr(
+        "quant_researcher.data.fmp.FMPClient", lambda **_: fake_client
+    )
+
+    result = runner.invoke(app, ["research", "news", "--symbols", "AAPL"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["inserted"] == 1
+    assert data["symbols_requested"] == ["AAPL"]
+
+
+def test_research_list_after_bundle(memory_db) -> None:
+    from datetime import UTC, datetime
+
+    from quant_researcher.models.profile import Profile
+
+    with memory_db() as sess:
+        sess.add(Profile(symbol="AAPL", raw={}, known_at=datetime.now(UTC)))
+        sess.commit()
+    runner.invoke(app, ["research", "bundle", "AAPL"])
+
+    result = runner.invoke(app, ["research", "list"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 1
+    assert data["bundles"][0]["symbol"] == "AAPL"
+
+
+def test_research_show_not_found(memory_db) -> None:
+    result = runner.invoke(app, ["research", "show", "nope-id"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "bundle_not_found"
+
+
 def test_holdings_sync_happy_path(memory_db, monkeypatch) -> None:
     """Full happy path with FlexClient mocked at the class level."""
     fake_settings = MagicMock()

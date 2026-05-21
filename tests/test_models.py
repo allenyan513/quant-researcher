@@ -286,3 +286,40 @@ def test_holdings_table_shape() -> None:
         "known_at",
     }
     assert [c.name for c in t.primary_key.columns] == ["account_id", "symbol", "as_of_date"]
+
+
+def test_metadata_includes_md_tables() -> None:
+    tables = set(Base.metadata.tables.keys())
+    assert "news_items" in tables
+    assert "research_bundles" in tables
+
+
+def test_news_items_table_shape() -> None:
+    t = Base.metadata.tables["news_items"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "symbol",
+        "published_at",
+        "url",
+        "headline",
+        "source",
+        "summary",
+        "image_url",
+        "raw",
+        "known_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["symbol", "published_at", "url"]
+
+
+def test_research_bundles_table_shape() -> None:
+    t = Base.metadata.tables["research_bundles"]
+    cols = {c.name for c in t.columns}
+    assert cols == {
+        "bundle_id",
+        "symbol",
+        "as_of",
+        "payload",
+        "code_version",
+        "created_at",
+    }
+    assert [c.name for c in t.primary_key.columns] == ["bundle_id"]

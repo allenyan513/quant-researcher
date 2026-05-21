@@ -237,3 +237,67 @@ def test_period_endpoint_raises_when_payload_not_list(client: FMPClient) -> None
     )
     with pytest.raises(FMPError):
         client.get_income_statement("AAPL")
+
+
+# ----- MD: news + earnings transcript -------------------------------------
+
+
+@respx.mock
+def test_get_news_happy_path(client: FMPClient) -> None:
+    payload = [
+        {
+            "symbol": "AAPL",
+            "publishedDate": "2026-05-20 10:00:00",
+            "title": "Apple beats Q2",
+            "url": "https://example.com/a",
+            "site": "Bloomberg",
+        }
+    ]
+    respx.get(f"{BASE}/news/stock-latest").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    assert client.get_news(["AAPL", "MSFT"]) == payload
+
+
+@respx.mock
+def test_get_news_passes_symbols_and_limit(client: FMPClient) -> None:
+    route = respx.get(f"{BASE}/news/stock-latest").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    client.get_news(["AAPL", "MSFT"], limit=10)
+    params = route.calls.last.request.url.params
+    assert params.get("symbols") == "AAPL,MSFT"
+    assert params.get("limit") == "10"
+
+
+@respx.mock
+def test_get_news_returns_empty_on_402(client: FMPClient) -> None:
+    respx.get(f"{BASE}/news/stock-latest").mock(
+        return_value=httpx.Response(402, text="Premium endpoint")
+    )
+    assert client.get_news("AAPL") == []
+
+
+@respx.mock
+def test_get_earnings_transcript_happy_path(client: FMPClient) -> None:
+    payload = [
+        {
+            "symbol": "AAPL",
+            "year": 2024,
+            "quarter": 4,
+            "date": "2024-11-01",
+            "content": "Good morning everyone…",
+        }
+    ]
+    respx.get(f"{BASE}/earning-call-transcript").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    assert client.get_earnings_transcript("AAPL", year=2024, quarter=4) == payload
+
+
+@respx.mock
+def test_get_earnings_transcript_returns_empty_on_402(client: FMPClient) -> None:
+    respx.get(f"{BASE}/earning-call-transcript").mock(
+        return_value=httpx.Response(402, text="premium")
+    )
+    assert client.get_earnings_transcript("AAPL") == []
