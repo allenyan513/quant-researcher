@@ -392,6 +392,146 @@ def test_data_refresh_rejects_invalid_periods(memory_db, data_env) -> None:
     assert payloads[0]["error"]["code"] == "invalid_periods"
 
 
+# ----- MA-4: --force + skipped_fresh + qr data freshness -------------------
+
+
+def test_data_refresh_default_skips_fresh_symbols(memory_db, data_env) -> None:
+    """Default `qr data refresh --scope profile` skips symbols whose profile
+    row is within the freshness threshold."""
+    from datetime import UTC, datetime, timedelta
+
+    from quant_researcher.models.profile import Profile
+
+    _seed_universe(memory_db, ["AAPL", "MSFT"])
+    # Pre-seed AAPL as fresh (5d old); MSFT has no row → missing → refreshed.
+    with memory_db() as sess:
+        sess.add(
+            Profile(
+                symbol="AAPL", known_at=datetime.now(UTC) - timedelta(days=5), raw={}
+            )
+        )
+        sess.commit()
+    data_env.get_profile.side_effect = lambda sym: {"symbol": sym, "sector": "Tech"}
+
+    result = runner.invoke(app, ["data", "refresh", "--scope", "profile"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["force"] is False
+    profile_scope = data["scopes"]["profile"]
+    # MSFT (missing) refreshed; AAPL (fresh) skipped.
+    assert profile_scope["succeeded_count"] == 1
+    assert profile_scope["skipped_fresh"] == ["AAPL"]
+    # FMP only called for MSFT.
+    called = [c.args[0] for c in data_env.get_profile.call_args_list]
+    assert called == ["MSFT"]
+
+
+def test_data_refresh_force_ignores_freshness(memory_db, data_env) -> None:
+    """`--force` makes the refresh call FMP for every requested symbol."""
+    from datetime import UTC, datetime, timedelta
+
+    from quant_researcher.models.profile import Profile
+
+    _seed_universe(memory_db, ["AAPL", "MSFT"])
+    with memory_db() as sess:
+        sess.add(
+            Profile(
+                symbol="AAPL", known_at=datetime.now(UTC) - timedelta(days=5), raw={}
+            )
+        )
+        sess.add(
+            Profile(
+                symbol="MSFT", known_at=datetime.now(UTC) - timedelta(days=5), raw={}
+            )
+        )
+        sess.commit()
+    data_env.get_profile.side_effect = lambda sym: {"symbol": sym, "sector": "Tech"}
+
+    result = runner.invoke(app, ["data", "refresh", "--scope", "profile", "--force"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["force"] is True
+    profile_scope = data["scopes"]["profile"]
+    assert profile_scope["succeeded_count"] == 2
+    assert profile_scope["skipped_fresh"] == []
+    # FMP called for both even though they're fresh.
+    called = sorted(c.args[0] for c in data_env.get_profile.call_args_list)
+    assert called == ["AAPL", "MSFT"]
+
+
+def test_data_freshness_per_scope_summary(memory_db) -> None:
+    """`qr data freshness` returns counts + stale_symbols per scope."""
+    from datetime import UTC, datetime, timedelta
+
+    from quant_researcher.models.profile import Profile
+
+    _seed_universe(memory_db, ["AAPL", "MSFT", "NVDA"])
+    # AAPL fresh, MSFT stale, NVDA missing.
+    with memory_db() as sess:
+        sess.add(
+            Profile(
+                symbol="AAPL", known_at=datetime.now(UTC) - timedelta(days=5), raw={}
+            )
+        )
+        sess.add(
+            Profile(
+                symbol="MSFT", known_at=datetime.now(UTC) - timedelta(days=40), raw={}
+            )
+        )
+        sess.commit()
+
+    result = runner.invoke(app, ["data", "freshness", "--scope", "profile"])
+    assert result.exit_code == 0
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    data = payloads[0]["data"]
+    assert data["scope"] == "profile"
+    assert data["universe_size"] == 3
+    profile = data["scopes"]["profile"]
+    assert profile["total"] == 3
+    assert profile["fresh"] == 1
+    assert profile["stale"] == 1
+    assert profile["missing"] == 1
+    assert profile["threshold_days"] == 30
+    assert profile["stale_symbols"] == ["MSFT", "NVDA"]
+
+
+def test_data_freshness_all_scope(memory_db) -> None:
+    """`qr data freshness` with default scope covers all 5 known scopes."""
+    _seed_universe(memory_db, ["AAPL"])
+    result = runner.invoke(app, ["data", "freshness"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert set(data["scopes"].keys()) == {
+        "profile",
+        "quote",
+        "financials",
+        "ratios",
+        "estimates",
+    }
+    # Fresh DB → every scope is fully missing.
+    for scope_name, sf in data["scopes"].items():
+        assert sf["missing"] == 1, scope_name
+        assert sf["stale_symbols"] == ["AAPL"]
+
+
+def test_data_freshness_rejects_invalid_scope(memory_db) -> None:
+    _seed_universe(memory_db, ["AAPL"])
+    result = runner.invoke(app, ["data", "freshness", "--scope", "junk"])
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    assert payloads[0]["error"]["code"] == "invalid_scope"
+
+
+def test_data_freshness_empty_universe(memory_db) -> None:
+    result = runner.invoke(app, ["data", "freshness"])
+    assert result.exit_code == 1
+    payloads = _json_lines(result.output)
+    assert len(payloads) == 1
+    assert payloads[0]["error"]["code"] == "empty_universe"
+
+
 def test_data_refresh_all_scope_covers_every_table(memory_db, data_env) -> None:
     _seed_universe(memory_db, ["AAPL"])
     data_env.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}

@@ -87,12 +87,15 @@ def test_refresh_profile_inserts_new_row(session: Session, fmp: MagicMock) -> No
 
 
 def test_refresh_profile_overwrites_existing(session: Session, fmp: MagicMock) -> None:
+    # First insert (fresh profile lands).
     fmp.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}
     refresh_profile(session, fmp, ["AAPL"])
     session.commit()
 
+    # Force-refresh path: tests the overwrite semantic itself. (Default
+    # `only_stale=True` would skip — the row was just inserted, < 30d old.)
     fmp.get_profile.return_value = {"symbol": "AAPL", "sector": "Updated"}
-    refresh_profile(session, fmp, ["AAPL"])
+    refresh_profile(session, fmp, ["AAPL"], only_stale=False)
     session.commit()
 
     row = session.get(Profile, "AAPL")
@@ -552,15 +555,76 @@ def test_refresh_estimates_merge_revises_existing_row(
     refresh_estimates(session, fmp, ["AAPL"], periods=("annual",))
     session.commit()
 
+    # Force on the second call — the just-inserted row is < 7d old (fresh) so
+    # the default `only_stale=True` would correctly skip it. This test
+    # exercises the merge/revision semantic itself.
     fmp.get_analyst_estimates.return_value = [
         {"symbol": "AAPL", "date": "2025-09-30", "period": "FY", "estimatedEpsAvg": 7.5}
     ]
-    refresh_estimates(session, fmp, ["AAPL"], periods=("annual",))
+    refresh_estimates(session, fmp, ["AAPL"], periods=("annual",), only_stale=False)
     session.commit()
 
     row = session.get(AnalystEstimate, ("AAPL", date(2025, 9, 30), "FY"))
     assert row is not None
     assert row.eps_avg == 7.5  # revised
+
+
+# ----- MA-4: only_stale default -------------------------------------------
+
+
+def test_refresh_default_skips_fresh_symbols(session: Session, fmp: MagicMock) -> None:
+    # Pre-seed a Profile row that's < 30d old → fresh by default threshold.
+    session.add(
+        Profile(symbol="AAPL", known_at=datetime.now(UTC) - timedelta(days=5), raw={})
+    )
+    session.commit()
+
+    result = refresh_profile(session, fmp, ["AAPL"])
+    # FMP never called: stale_symbols filtered AAPL out before the loop.
+    fmp.get_profile.assert_not_called()
+    assert result.outcomes == []
+    assert result.total_upserted == 0
+
+
+def test_refresh_force_ignores_freshness(session: Session, fmp: MagicMock) -> None:
+    # Same fresh Profile pre-seed; explicit only_stale=False should hit FMP.
+    session.add(
+        Profile(symbol="AAPL", known_at=datetime.now(UTC) - timedelta(days=5), raw={})
+    )
+    session.commit()
+    fmp.get_profile.return_value = {"symbol": "AAPL", "sector": "Forced"}
+
+    refresh_profile(session, fmp, ["AAPL"], only_stale=False)
+    fmp.get_profile.assert_called_once_with("AAPL")
+
+
+def test_refresh_quotes_only_stale_skips_recent(session: Session, fmp: MagicMock) -> None:
+    # Pre-seed bars within the 3-day window → fresh.
+    today = date.today()
+    session.execute(
+        insert(DailyPrice),
+        [{"symbol": "AAPL", "trade_date": today - timedelta(days=1), "close": 1.0}],
+    )
+    session.commit()
+
+    refresh_quotes(session, fmp, ["AAPL"])
+    fmp.get_historical_prices.assert_not_called()
+
+
+def test_refresh_estimates_only_stale_filters(session: Session, fmp: MagicMock) -> None:
+    session.add(
+        AnalystEstimate(
+            symbol="AAPL",
+            fiscal_date=date(2025, 12, 31),
+            period="FY",
+            known_at=datetime.now(UTC) - timedelta(days=2),
+            raw={},
+        )
+    )
+    session.commit()
+
+    refresh_estimates(session, fmp, ["AAPL"], periods=("annual",))
+    fmp.get_analyst_estimates.assert_not_called()
 
 
 def test_refresh_estimates_period_fallback_from_request(

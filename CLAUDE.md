@@ -90,7 +90,23 @@ from quant_researcher import models  # noqa: E402, F401
 
 测试锁:`tests/test_models.py::test_ma3_known_at_has_no_server_default`。**别给财报三表加 `server_default=func.now()`**,会破 point-in-time 查询。
 
-### 6. Per-symbol AND per-period 失败隔离
+### 6. Staleness 阈值(MA-4)+ refresh 默认 only-stale
+
+阈值住在 [`quant_researcher/data/freshness.py`](quant_researcher/data/freshness.py) 的 `SCOPE_THRESHOLDS`,唯一来源:
+
+| Scope | 阈值 | 判定字段 |
+|---|---|---|
+| `profile` | 30 天 | `MAX(known_at)` |
+| `quote` | 3 calendar days | `MAX(trade_date)` — pragmatic Fri→Mon 安全,不引交易日历 |
+| `financials` | 100 天 | `MAX(fiscal_date)` from `income_statement` —— "新季度落地了没",不是"最近刷过没" |
+| `ratios` | 100 天 | `MAX(known_at)` |
+| `estimates` | 7 天 | `MAX(known_at)` |
+
+"是否过期"逻辑只走两个函数:`check_freshness(session, symbols)`(报告用)和 `stale_symbols(session, scope, symbols)`(filter 用)。**不要复制阈值或重新实现 staleness 查询**,所有路径必须经它俩。
+
+`refresh_X(session, client, symbols, *, only_stale=True)` —— `only_stale=True`(默认)等价于在函数顶部跑一遍 `symbols = stale_symbols(session, "<scope>", symbols)`。CLI 层 `qr data refresh` 在 `--force` 缺省时按这个路径走;`--force` 时 CLI 自己用 `targets` 跳过 filter 并显式传 `only_stale=False`(避免函数层重做一次)。
+
+### 7. Per-symbol AND per-period 失败隔离
 
 `refresh_X(session, client, symbols, *, periods=...)` 单 ticker 任一 period 失败时:
 - 该 period 的 FMP error 进 `SymbolOutcome.error`(带 `period:` 前缀)
@@ -159,6 +175,7 @@ config/watchlist.txt   .gitignored(用户机器上自填);.sample 是模板
 - **SQLite 无 tz**:用 `_naive_utc` 测试,生产 Postgres 没这问题。
 - **FMP `acceptedDate` 不一定有**:`_as_datetime` 返回 None;`_ingest_statement` 会跳过 known_at=None 的行(避免 NOT NULL 违反)。
 - **FMP 部分 endpoint 的 `period=quarter` 是付费**:用户跑出 402 → 加 `--periods annual` workaround,默认仍 `annual,quarter`。
+- **`qr data refresh` 默认 only-stale(MA-4 破坏性变更)**:不带 `--force` 时,fresh 行会跳过 FMP 调用,envelope 里 `scopes.<scope>.skipped_fresh` 列出被跳过的票。若要复现 MA-3 之前"全刷"行为,加 `--force`。`refresh_X` 函数层的 `only_stale=True` 也是 default,改这行为时函数 + CLI 两侧都要同步。
 - **`session.scalars(select(a, b, c))` 只返回第一列**;要多列 tuple 用 `session.execute(select(a, b, c))` 然后 `for row in result`。
 - **`Base.metadata.create_all(checkfirst=True)` 不修改既有表**;不要指望它自动跟模型同步。
 - **`pyproject.toml` 的 ruff `select = ["E", "F", "W", "I", "B", "UP"]`** + `ignore = ["B008"]`。别加 lint 规则没沟通。
