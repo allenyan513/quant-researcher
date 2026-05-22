@@ -177,6 +177,7 @@ _MA3_ENDPOINTS = [
     ("get_cash_flow", "/cash-flow-statement"),
     ("get_ratios", "/ratios"),
     ("get_analyst_estimates", "/analyst-estimates"),
+    ("get_key_metrics", "/key-metrics"),  # MA-5: ROE/ROA/fcf_yield source
 ]
 
 
