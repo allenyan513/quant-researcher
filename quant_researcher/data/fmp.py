@@ -123,6 +123,20 @@ class FMPClient:
         """Return `/ratios` rows (period-keyed financial ratios)."""
         return self._get_period_list("/ratios", symbol, period, limit)
 
+    def get_key_metrics(
+        self, symbol: str, *, period: str = "quarter", limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Return `/key-metrics` rows (period-keyed).
+
+        FMP splits company metrics across two endpoints: `/ratios` (margins,
+        valuation multiples) and `/key-metrics` (`returnOnEquity`,
+        `returnOnAssets`, `freeCashFlowYield`, plus `returnOnInvestedCapital`
+        / `earningsYield` not yet in our schema). `refresh_ratios` calls both
+        and merges by `(period, fiscal_date)`. Field names verified against the
+        real `/stable/key-metrics` response 2026-05-21.
+        """
+        return self._get_period_list("/key-metrics", symbol, period, limit)
+
     def get_analyst_estimates(
         self, symbol: str, *, period: str = "quarter", limit: int | None = None
     ) -> list[dict[str, Any]]:

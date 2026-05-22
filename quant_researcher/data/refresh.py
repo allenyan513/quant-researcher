@@ -393,10 +393,22 @@ def refresh_ratios(
             except FMPError as exc:
                 errs.append(f"{period}: {exc}")
                 continue
+            # ROE/ROA/fcf_yield live in /key-metrics, not /ratios — fetch and
+            # merge by fiscal_date. A key-metrics failure marks the symbol
+            # ok=False (these are first-class for MB screening) but the
+            # /ratios rows above still get ingested (per-period isolation).
+            try:
+                km_by_date = _key_metrics_by_date(
+                    client.get_key_metrics(sym, period=period)
+                )
+            except FMPError as exc:
+                errs.append(f"{period} key-metrics: {exc}")
+                km_by_date = {}
             for raw in rows:
                 mapped = _ratio_from_fmp(sym, raw)
                 if mapped["fiscal_date"] is None or not mapped["period"]:
                     continue
+                _merge_key_metrics(mapped, km_by_date.get(mapped["fiscal_date"]))
                 session.merge(FinancialRatios(**mapped))
                 upserted += 1
         outcomes.append(
@@ -414,10 +426,11 @@ def refresh_ratios(
 def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
     """Map FMP `/ratios` payload to FinancialRatios columns.
 
-    Field names verified against real FMP /ratios response 2026-05-21. Some
-    metrics FMP /ratios doesn't return at all (ROE/ROA, fcf_yield) — those
-    live in `/key-metrics` instead; left as None here and computed
-    on-the-fly from income+balance/market_cap if/when needed (TODO).
+    Field names verified against real FMP /ratios response 2026-05-21. ROE/ROA
+    and fcf_yield are usually absent from /ratios (they live in /key-metrics),
+    so they parse to None here — `_merge_key_metrics` backfills them in
+    `refresh_ratios`. Reading `returnOnEquity` etc. anyway is defensive: if a
+    plan/endpoint ever does return them in /ratios, that value wins.
     """
     return {
         "symbol": symbol,
@@ -449,8 +462,7 @@ def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
             or row.get("debtEquityRatio")
             or row.get("debtToEquity")
         ),
-        # FMP /ratios doesn't expose ROE/ROA directly — these stay None.
-        # Derived from income / balance when needed: ROE = net_income/equity.
+        # ROE/ROA usually absent from /ratios — backfilled from /key-metrics.
         "return_on_equity": _as_float(row.get("returnOnEquity")),
         "return_on_assets": _as_float(row.get("returnOnAssets")),
         "gross_margin": _as_float(row.get("grossProfitMargin")),
@@ -458,7 +470,7 @@ def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
         "net_margin": _as_float(
             row.get("netProfitMargin") or row.get("bottomLineProfitMargin")
         ),
-        # FMP /ratios has no fcf_yield. Compute from /key-metrics later.
+        # fcf_yield absent from /ratios — backfilled from /key-metrics.
         "fcf_yield": _as_float(row.get("freeCashFlowYield")),
         "payout_ratio": _as_float(
             row.get("dividendPayoutRatio") or row.get("payoutRatio")
@@ -466,6 +478,42 @@ def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
         "raw": row,
         "known_at": datetime.now(UTC),
     }
+
+
+# FinancialRatios column -> FMP /key-metrics field. These are the metrics
+# /ratios leaves None; /key-metrics is the authoritative source.
+_KEY_METRIC_FIELDS = {
+    "return_on_equity": "returnOnEquity",
+    "return_on_assets": "returnOnAssets",
+    "fcf_yield": "freeCashFlowYield",
+}
+
+
+def _key_metrics_by_date(rows: list[dict[str, Any]]) -> dict[date, dict[str, Any]]:
+    """Index /key-metrics rows by fiscal date so they join onto /ratios rows.
+
+    Caller fetches /key-metrics for the same period as /ratios, so fiscal_date
+    alone is a safe join key (no annual/quarter collision).
+    """
+    out: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        fiscal = _as_date(row.get("date"))
+        if fiscal is not None:
+            out[fiscal] = row
+    return out
+
+
+def _merge_key_metrics(mapped: dict[str, Any], km_row: dict[str, Any] | None) -> None:
+    """Backfill ROE/ROA/fcf_yield from /key-metrics, in place.
+
+    Only fills columns /ratios left None — a non-null /ratios value wins
+    (defensive: don't clobber a real value if FMP starts returning these).
+    """
+    if km_row is None:
+        return
+    for col, fmp_key in _KEY_METRIC_FIELDS.items():
+        if mapped.get(col) is None:
+            mapped[col] = _as_float(km_row.get(fmp_key))
 
 
 # ----- analyst estimates ---------------------------------------------------
