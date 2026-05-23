@@ -34,10 +34,12 @@ class FinancialRatios(Base):
     debt_to_equity: Mapped[float | None] = mapped_column(Float)
     return_on_equity: Mapped[float | None] = mapped_column(Float)
     return_on_assets: Mapped[float | None] = mapped_column(Float)
+    return_on_invested_capital: Mapped[float | None] = mapped_column(Float)
     gross_margin: Mapped[float | None] = mapped_column(Float)
     operating_margin: Mapped[float | None] = mapped_column(Float)
     net_margin: Mapped[float | None] = mapped_column(Float)
     fcf_yield: Mapped[float | None] = mapped_column(Float)
+    earnings_yield: Mapped[float | None] = mapped_column(Float)
     payout_ratio: Mapped[float | None] = mapped_column(Float)
 
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSON)
