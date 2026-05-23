@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。ME 的 morningcall 数据包仍延后。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics` 补全 ROE/ROA/fcf_yield(详见 §6 末尾);**MH**(回测)整包移植 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。
+代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics` 补全 ROE/ROA/fcf_yield(详见 §6 末尾);**MH**(回测)整包移植 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。**后续(本批)**:`financial_ratios` 加 `return_on_invested_capital` / `earnings_yield` 两列(screen 字段 `roic` / `earnings_yield`);新增 `qr morningcall`(组合晨报,§14)+ `qr earnings`(财报 actual-vs-est + 论点,§15);backtest 注册表补 buy_and_hold / macd_crossover / bollinger_reversion / rsi_reversion / donchian_breakout(均单标的)。
 
 ## 命令(运行前必看)
 
@@ -106,7 +106,7 @@ from quant_researcher import models  # noqa: E402, F401
 
 `refresh_X(session, client, symbols, *, only_stale=True)` —— `only_stale=True`(默认)等价于在函数顶部跑一遍 `symbols = stale_symbols(session, "<scope>", symbols)`。CLI 层 `qr data refresh` 在 `--force` 缺省时按这个路径走;`--force` 时 CLI 自己用 `targets` 跳过 filter 并显式传 `only_stale=False`(避免函数层重做一次)。
 
-**MA-5:`refresh_ratios` 调两个 endpoint。** `ROE / ROA / fcf_yield` 不在 FMP `/ratios` 里(几乎总是 None),它们住在 `/key-metrics`。所以 `refresh_ratios` 每个 period 抓 `/ratios` **和** `/key-metrics`,用 `_key_metrics_by_date` 按 `fiscal_date` join,`_merge_key_metrics` 把这三个字段回填进 ratio 行 —— **仅当 /ratios 该字段为 None 时**(防御:万一 FMP 哪天在 /ratios 自己填了,以 /ratios 为准)。`/key-metrics` 失败(如付费 plan 不含 → 402)走 **per-period hard-fail**(symbol `ok=False`,错误带 `key-metrics:` 前缀),但 `/ratios` 行照常入库 —— 跟 §12 一致,**不**走 news 那种软失败,因为这三个是 MB 筛选的 first-class 字段。`/key-metrics` 还返回 `returnOnInvestedCapital` / `earningsYield`,但加列要手工 ALTER(见"Schema 演进"),留给 MG。
+**MA-5:`refresh_ratios` 调两个 endpoint。** `ROE / ROA / fcf_yield` 不在 FMP `/ratios` 里(几乎总是 None),它们住在 `/key-metrics`。所以 `refresh_ratios` 每个 period 抓 `/ratios` **和** `/key-metrics`,用 `_key_metrics_by_date` 按 `fiscal_date` join,`_merge_key_metrics` 把这三个字段回填进 ratio 行 —— **仅当 /ratios 该字段为 None 时**(防御:万一 FMP 哪天在 /ratios 自己填了,以 /ratios 为准)。`/key-metrics` 失败(如付费 plan 不含 → 402)走 **per-period hard-fail**(symbol `ok=False`,错误带 `key-metrics:` 前缀),但 `/ratios` 行照常入库 —— 跟 §12 一致,**不**走 news 那种软失败,因为这三个是 MB 筛选的 first-class 字段。`/key-metrics` 还返回 `returnOnInvestedCapital` / `earningsYield` —— **已加列**(`return_on_invested_capital` / `earnings_yield`,screen 字段 `roic` / `earnings_yield`)。加这俩走的就是标准流程:`_KEY_METRIC_FIELDS` 加映射 + `_ratio_from_fmp` 加 None 占位 + model/screen 加列(`_merge_key_metrics` 是 generic 的,零改动)+ 手工 ALTER 生产库。要再加 /key-metrics 字段照抄即可。
 
 ### 7. MB 筛选 — AST sandbox + 命名 DSL
 
@@ -205,6 +205,14 @@ from quant_researcher import models  # noqa: E402, F401
 - **多标的 bar 错位 → 前视偏差**(`engine.py` 事件循环):循环按 `range(max_bars)` 对每个 symbol 各自 `advance()`,**假设所有标的 bar 完全对齐**。若某标的有缺口(停牌/上市晚),它的 bar 会相对其他标的"左移",同一 `on_bar` 里看到不同日期的价格。v1 只有单标的 `sma_crossover`,且 warehouse 是美股共享交易日历(同期标的天然对齐),不触发;**多标的策略(走 `--strategy-file`)要自己保证标的历史齐全**。正解是按"全标的去重排序时间轴"迭代。
 - **STOP_LIMIT 触发态不持久**(`broker.py` `_fill_stop_limit`):stop 触发后若当根 bar limit 没成交,只 return None 而**没转成 LIMIT 单**,下根 bar 重新判 trigger —— 价格回到 stop 另一侧会"un-trigger"。v1 只用市价单(`buy`/`sell`),不碰;用 `set_stop_loss` 等止损的自定义策略要注意。正解是触发后把 order 状态置为已触发并转 LIMIT。
 
+### 14. `qr morningcall` — 组合晨报(features §E)
+
+[`quant_researcher/research/morningcall.py`](quant_researcher/research/morningcall.py) `build_morning_call(session, *, account=None, as_of=None, news_per_holding=1)` 从 holdings + warehouse 拼一份**精简**组合晨报(**不是** N 份完整 bundle):逐持仓精简视图(权重/盈亏%/日涨跌/精简 ratios/估值 upside/1 条新闻/关联 decision)+ 组合层(总市值/总盈亏/sector exposure/top-bottom movers/现金)。**复用** bundler 的 `_latest_price` / `_latest_ratios` / `_recent_valuations` / `_recent_news` + `ledger.sectors.etf_for_sector`;profile/decision 批量查。`save_morning_call` 落 `MorningCallSnapshot`(uuid PK,`--save` 默认关)。**诚实 data 约定**:跨币种只 raw sum + note;现金取不到 → None + note;`day_change_pct` 是 close-to-close(只有日线,无隔夜 gap);空持仓 → ok + notes。估值 headline 取 dcf(没有 `"all"` 这种 model_type)。
+
+### 15. `qr earnings` — 财报 actual-vs-est + 论点(features §D)
+
+[`quant_researcher/research/earnings.py`](quant_researcher/research/earnings.py) `read_earnings(session, symbol, *, limit=4, transcript_excerpt=None, decision_limit=5)` 是**纯 warehouse 读**(不调 FMP、不写库;transcript 由 CLI 在线取后注入,跟 bundler 同款分离)。把最近 N 个 `IncomeStatement` actual 按共享 PK `(symbol, fiscal_date, period)` join `AnalystEstimate`,有估值就算 EPS/营收 surprise(`abs()` 分母防负估值翻号),论点只**陈列** Decision(不打分,Claude 判)。**关键 caveat**:估值是 forward + merge 覆盖的,过去期只有"当时 forward 时抓到"才有 → 历史 surprise **稀疏**;`estimate_available` / `estimates_matched` 把覆盖率摆明,绝不在没估值时暗示 beat/miss。`--transcript` 在线取(402-safe)。
+
 ## 文件地图
 
 ```
@@ -221,6 +229,7 @@ quant_researcher/
 │                      strategy/analytics/engine.py)。改它前看 §13。warehouse_feed.py 是
 │                      唯一 qr 专属新增文件
 ├── backtest/          MH:qr 编排层(runner.py 唯一入口 + strategies/ 注册表 + loader.py)
+├── research/          bundler.py(数据包,§10)+ morningcall.py(§14)+ earnings.py(§15)
 └── models/            每文件一/数个 model;__init__.py re-export = 注册
 tests/                 mirror 上面结构;in-memory SQLite + MagicMock(spec=FMPClient)
 docs/                  features.md + implementation-plan.md(改设计前先改这里)
@@ -260,7 +269,7 @@ config/watchlist.txt   .gitignored(用户机器上自填);.sample 是模板
 ## Schema 演进(D11:无 Alembic)
 
 - **加新表**:`models/X.py` + `models/__init__.py` re-export → `qr db init` 自动落地。
-- **加新列(可空)**:改 model → `qr db init` **不会**自动 ALTER 既有表。需要在 Supabase SQL Editor 手工 `ALTER TABLE X ADD COLUMN ...`。
+- **加新列(可空)**:改 model → `qr db init` **不会**自动 ALTER 既有表。需要在 Supabase SQL Editor 手工 `ALTER TABLE X ADD COLUMN ...`。例:`financial_ratios` 的 `return_on_invested_capital` / `earnings_yield` 就是这么加的(`ALTER TABLE financial_ratios ADD COLUMN return_on_invested_capital double precision; ADD COLUMN earnings_yield double precision;`),加完 `qr data refresh --scope ratios --force` 回填。
 - **改 / 删列**:Supabase dashboard 手工 SQL,顺序:先改 model + 跑测试 → 再 ALTER 生产库 → 部署。
 
 ## 常见坑

@@ -19,6 +19,7 @@ from quant_researcher.models.decisions import Decision, DecisionTracking
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.holdings import Holding
+from quant_researcher.models.morningcall import MorningCallSnapshot
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -39,6 +40,7 @@ __all__ = [
     "FinancialRatios",
     "Holding",
     "IncomeStatement",
+    "MorningCallSnapshot",
     "NewsItem",
     "Profile",
     "ResearchBundle",

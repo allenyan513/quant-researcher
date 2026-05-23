@@ -1084,6 +1084,129 @@ def backtest_show(
 
 
 # ---------------------------------------------------------------------------
+# qr morningcall  (top-level — portfolio morning briefing)
+# ---------------------------------------------------------------------------
+
+
+@app.command("morningcall")
+def morningcall_cmd(
+    account: str | None = typer.Option(
+        None, "--account", "-a", help="Filter to one account_id (default: all)."
+    ),
+    as_of: str = typer.Option(
+        "latest", "--as-of", help="`latest` (default) or YYYY-MM-DD holdings date."
+    ),
+    save: bool = typer.Option(
+        False, "--save/--no-save", help="Persist a MorningCallSnapshot (default off)."
+    ),
+    news: int = typer.Option(
+        1, "--news", help="Headlines per holding to include (default 1)."
+    ),
+) -> None:
+    """Portfolio morning briefing: lean per-holding view + portfolio aggregates."""
+    from datetime import date as _date
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.research.morningcall import (
+        build_morning_call,
+        save_morning_call,
+    )
+
+    target_date: _date | None = None
+    if as_of != "latest":
+        try:
+            target_date = _date.fromisoformat(as_of)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_as_of",
+                    f"--as-of must be 'latest' or YYYY-MM-DD, got {as_of!r}",
+                )
+            )
+
+    snapshot_id: str | None = None
+    try:
+        with session_factory()() as sess, sess.begin():
+            payload = build_morning_call(
+                sess, account=account, as_of=target_date, news_per_holding=news
+            )
+            if save:
+                snapshot_id = save_morning_call(sess, payload, account=account)
+    except Exception as exc:
+        _emit(Envelope.failure("morningcall_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"saved": save, **payload},
+                data_freshness={"warehouse": "live"},
+                snapshot_id=snapshot_id,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# qr earnings  (top-level — actual vs estimate + thesis)
+# ---------------------------------------------------------------------------
+
+
+@app.command("earnings")
+def earnings_cmd(
+    symbol: str = typer.Argument(..., help="Ticker to read (e.g. AAPL)."),
+    limit: int = typer.Option(
+        4, "--limit", "-l", help="Most-recent N reported periods (default 4)."
+    ),
+    transcript: bool = typer.Option(
+        False,
+        "--transcript",
+        help="Also fetch the latest earnings-call transcript excerpt (online, 402-safe).",
+    ),
+) -> None:
+    """Recent earnings actual vs analyst estimate + recorded thesis(es)."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.research.earnings import read_earnings
+
+    sym = symbol.upper()
+    # --transcript needs an API key: validate OUTSIDE try (_emit raises Exit).
+    api_key: str | None = None
+    if transcript:
+        api_key = settings().fmp_api_key
+        if not api_key:
+            _emit(
+                Envelope.failure(
+                    "missing_fmp_api_key",
+                    "FMP_API_KEY is not set; required for --transcript.",
+                )
+            )
+
+    try:
+        excerpt: str | None = None
+        tmeta: dict[str, Any] = {}
+        if transcript:
+            from quant_researcher.data.fmp import FMPClient
+
+            with FMPClient(api_key=api_key) as client:
+                rows = client.get_earnings_transcript(sym)  # [] on 402
+            if rows:
+                excerpt = (rows[0].get("content") or "")[:2000] or None
+                tmeta = {
+                    "year": rows[0].get("year"),
+                    "quarter": rows[0].get("quarter"),
+                    "date": rows[0].get("date"),
+                }
+        with session_factory()() as sess:  # read-only, no begin()
+            data = read_earnings(sess, sym, limit=limit, transcript_excerpt=excerpt)
+        if transcript:
+            data["transcript"] = {"available": excerpt is not None, "excerpt": excerpt, **tmeta}
+    except Exception as exc:
+        _emit(Envelope.failure("earnings_read_failed", str(exc)))
+    else:
+        freshness = {"warehouse": "live"}
+        if transcript:
+            freshness["fmp"] = "live"
+        _emit(Envelope.success(data=data, data_freshness=freshness))
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

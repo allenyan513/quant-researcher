@@ -89,6 +89,7 @@ quant-researcher/
 - **MB 筛选(B)**:表达式解析(衍生比较 `forwardPe<pe`、分位);技术扫描复用移植指标(MACD 金叉/均线/RSI/52w/放量,"近 N 日"窗口);命名/持久化/diff。
 - **MC 估值(C)**:WACC(Bloomberg 调整 β + sector_betas + FRED/兜底 4.5%);DCF-FCFF(增长/EBITDA 退出)、PEG、P/E·EV/EBITDA·EV/Rev 倍数、EPV、DDM;5×5 敏感性;假设可覆盖;快照持久化。
 - **MD/ME/MF**:`research bundle`/`earnings read` 聚合器(含 insider/13F/analyst/transcript)→ 数据包+快照;`holdings`(先 CSV,后 IBKR Flex Python 重写)+ `morningcall` 数据包;决策账本(入账即快照当时数据 + track 1w/1m/3m/6m vs SPY+行业ETF + scorecard 按论点/行业/信心)。
+  - **后续(2026-05-22)**:`qr morningcall`(组合晨报:逐持仓精简视图 + 组合层 sector/movers,落 `MorningCallSnapshot`)+ `qr earnings`(actual-vs-est surprise + 论点陈列,纯 warehouse + `--transcript` 在线可选)落地(详见 CLAUDE.md §14/§15);`financial_ratios` 加 `return_on_invested_capital` / `earnings_yield`(screen 字段 `roic` / `earnings_yield`);backtest 注册表补 5 个单标的策略。
 - **MG 信号(G)**:假设规格 → 宇宙+历史算因子 → IC/分位/衰减 → 版本化信号(反哺 B/F/H)。
 - **MH 回测(H)** ✅(2026-05-22):quant-engine **整包移植**到 `quant_researcher/engine/`(38 文件,改 import 前缀;丢弃 export/optimize/charts/cached_feed;去 yfinance);`WarehouseDataFeed(DataFeed).fetch()` 读 `daily_prices`(默认 adj_close 回调 OHLC);`quant_researcher/backtest/`(runner + 策略注册表 + `--strategy-file` loader);`qr backtest run/list/show` → 指标/成交/净值 + `backtest_runs` 持久化。risk/margin 移植但 CLI v1 不接。新依赖 scipy。上游 235 测试整包移植 + 21 qr 专属测试。详见 CLAUDE.md §13。
 
