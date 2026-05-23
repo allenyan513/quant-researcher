@@ -150,7 +150,11 @@ def default_growth_from_history(
     if len(historical) < 2:
         return None
     start, end = historical[0], historical[-1]
-    if start <= 0:
+    # CAGR is undefined for non-positive endpoints: a negative `end` (e.g. FCF
+    # swung negative) makes `(end/start)` negative and `negative ** (1/years)`
+    # returns a COMPLEX number silently (not a ValueError) — which then crashes
+    # downstream `min(cap, cagr)`. Guard both ends.
+    if start <= 0 or end <= 0:
         return None
     years = len(historical) - 1
     try:

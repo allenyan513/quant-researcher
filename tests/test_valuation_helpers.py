@@ -269,6 +269,24 @@ def test_earnings_growth_rate_none_when_negative_start(session: Session) -> None
     assert earnings_growth_rate(session, "X") is None
 
 
+def test_earnings_growth_rate_none_when_negative_newest(session: Session) -> None:
+    # Latest year a loss (newest < 0), 3+ points: (newest/oldest)**(1/years)
+    # would be a COMPLEX number (silent) and crash callers. Must return None.
+    for i, ni in enumerate([100.0, 150.0, -20.0]):  # newest (2024) negative
+        session.add(
+            IncomeStatement(
+                symbol="Z",
+                period="FY",
+                fiscal_date=date(2022 + i, 9, 30),
+                net_income=ni,
+                eps_diluted=1.0,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+    assert earnings_growth_rate(session, "Z", n=5) is None
+
+
 # ----- latest_ebitda ------------------------------------------------------
 
 
