@@ -199,7 +199,10 @@ def earnings_growth_rate(
     if len(series) < 2:
         return None
     newest, oldest = series[0], series[-1]
-    if oldest <= 0:
+    # Both endpoints must be positive: a negative `newest` (latest year a loss)
+    # makes the ratio negative and `negative ** (1/years)` returns a COMPLEX
+    # number silently (no ValueError), which then crashes callers' comparisons.
+    if oldest <= 0 or newest <= 0:
         return None
     years = len(series) - 1
     try:

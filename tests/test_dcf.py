@@ -190,3 +190,9 @@ def test_default_growth_floor_clips_decline() -> None:
 
 def test_default_growth_none_for_negative_start() -> None:
     assert default_growth_from_history([-10, 5, 10]) is None
+
+
+def test_default_growth_none_for_negative_end() -> None:
+    # 3+ points with a negative END: (end/start)**(1/years) would be COMPLEX
+    # (silent, no ValueError) and crash `min(cap, cagr)`. Must return None.
+    assert default_growth_from_history([100.0, 150.0, -50.0]) is None
