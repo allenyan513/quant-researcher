@@ -85,6 +85,7 @@ quant-researcher/
 
 - **M0 脚手架** ✅(2026-05-19):uv 工程、`qr` 入口(typer)、JSON 信封/契约、config(pydantic-settings 读 `QR_DATABASE_URL`)、SQLAlchemy `Base`、`qr db status|init|ping`、单元测试(envelope + CLI smoke)、ruff + GitHub Actions CI。
 - **MA 仓库+数据(A)**:SQLAlchemy 声明式 model(`Base.metadata.create_all` via `qr db init`);FMP REST client(令牌桶~250/min);分层刷新(quote 日 / 财报事件驱动 / estimates 周五 / profile 月,幂等 upsert,仿 `update-ticker`+`update-all`);`known_at`/`as_of`;`qr data refresh/freshness`、`qr universe`。
+  - **MA-5 key-metrics 补全**(2026-05-21):`refresh_ratios` 接上 FMP `/key-metrics`,补全 `/ratios` 缺的 `ROE / ROA / fcf_yield`(之前永远 None,导致 `qr screen --fundamental "roe>0.15"` 静默 0 命中)。按 `fiscal_date` join,仅回填 None 字段,`/key-metrics` 402 走 per-period hard-fail(详见 CLAUDE.md §6 末尾)。`returnOnInvestedCapital` / `earningsYield` 需 ALTER 加列,留 MG。
 - **MB 筛选(B)**:表达式解析(衍生比较 `forwardPe<pe`、分位);技术扫描复用移植指标(MACD 金叉/均线/RSI/52w/放量,"近 N 日"窗口);命名/持久化/diff。
 - **MC 估值(C)**:WACC(Bloomberg 调整 β + sector_betas + FRED/兜底 4.5%);DCF-FCFF(增长/EBITDA 退出)、PEG、P/E·EV/EBITDA·EV/Rev 倍数、EPV、DDM;5×5 敏感性;假设可覆盖;快照持久化。
 - **MD/ME/MF**:`research bundle`/`earnings read` 聚合器(含 insider/13F/analyst/transcript)→ 数据包+快照;`holdings`(先 CSV,后 IBKR Flex Python 重写)+ `morningcall` 数据包;决策账本(入账即快照当时数据 + track 1w/1m/3m/6m vs SPY+行业ETF + scorecard 按论点/行业/信心)。

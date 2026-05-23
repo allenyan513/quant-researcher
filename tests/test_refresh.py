@@ -521,6 +521,85 @@ def test_refresh_ratios_handles_alt_field_names(session: Session, fmp: MagicMock
     assert row.debt_to_equity == 1.5
 
 
+def test_refresh_ratios_merges_key_metrics(session: Session, fmp: MagicMock) -> None:
+    # MA-5: /ratios omits ROE/ROA/fcf_yield — they live in /key-metrics and get
+    # joined back onto the ratio row by fiscal_date.
+    fmp.get_ratios.return_value = [
+        {
+            "symbol": "AAPL",
+            "date": "2024-09-30",
+            "period": "FY",
+            "priceToEarningsRatio": 28.5,
+        }
+    ]
+    fmp.get_key_metrics.return_value = [
+        {
+            "symbol": "AAPL",
+            "date": "2024-09-30",
+            "period": "FY",
+            "returnOnEquity": 1.5,
+            "returnOnAssets": 0.3,
+            "freeCashFlowYield": 0.04,
+        }
+    ]
+    refresh_ratios(session, fmp, ["AAPL"], periods=("annual",))
+    session.commit()
+
+    row = session.get(FinancialRatios, ("AAPL", "FY", date(2024, 9, 30)))
+    assert row is not None
+    assert row.pe_ratio == 28.5  # from /ratios
+    assert row.return_on_equity == 1.5  # backfilled from /key-metrics
+    assert row.return_on_assets == 0.3
+    assert row.fcf_yield == 0.04
+
+
+def test_refresh_ratios_keeps_ratios_value_over_key_metrics(
+    session: Session, fmp: MagicMock
+) -> None:
+    # Defensive priority: if /ratios ever returns ROE itself, that value wins
+    # and /key-metrics must not clobber it.
+    fmp.get_ratios.return_value = [
+        {"symbol": "AAPL", "date": "2024-09-30", "period": "FY", "returnOnEquity": 1.2}
+    ]
+    fmp.get_key_metrics.return_value = [
+        {"symbol": "AAPL", "date": "2024-09-30", "period": "FY", "returnOnEquity": 9.9}
+    ]
+    refresh_ratios(session, fmp, ["AAPL"], periods=("annual",))
+    session.commit()
+
+    row = session.get(FinancialRatios, ("AAPL", "FY", date(2024, 9, 30)))
+    assert row is not None
+    assert row.return_on_equity == 1.2
+
+
+def test_refresh_ratios_key_metrics_402_marks_symbol_failed(
+    session: Session, fmp: MagicMock
+) -> None:
+    # /key-metrics is first-class for MB screening, so a 402 (plan doesn't
+    # include it) is a hard per-period failure — not a soft skip like news.
+    fmp.get_ratios.return_value = [
+        {
+            "symbol": "AAPL",
+            "date": "2024-09-30",
+            "period": "FY",
+            "priceToEarningsRatio": 28.5,
+        }
+    ]
+    fmp.get_key_metrics.side_effect = FMPError("payment required", status_code=402)
+
+    result = refresh_ratios(session, fmp, ["AAPL"], periods=("annual",))
+    session.commit()
+
+    assert result.succeeded == []
+    assert len(result.failed) == 1
+    assert "key-metrics" in result.failed[0]["error"]
+    # The /ratios row still lands (per-period isolation); only ROE/ROA are None.
+    row = session.get(FinancialRatios, ("AAPL", "FY", date(2024, 9, 30)))
+    assert row is not None
+    assert row.pe_ratio == 28.5
+    assert row.return_on_equity is None
+
+
 # ----- analyst estimates ----------------------------------------------------
 
 

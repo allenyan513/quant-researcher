@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA + MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。ME 的 morningcall 数据包仍延后。**MH**(回测)整包移植了 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。
+代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。ME 的 morningcall 数据包仍延后。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics` 补全 ROE/ROA/fcf_yield(详见 §6 末尾);**MH**(回测)整包移植 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。
 
 ## 命令(运行前必看)
 
@@ -105,6 +105,8 @@ from quant_researcher import models  # noqa: E402, F401
 "是否过期"逻辑只走两个函数:`check_freshness(session, symbols)`(报告用)和 `stale_symbols(session, scope, symbols)`(filter 用)。**不要复制阈值或重新实现 staleness 查询**,所有路径必须经它俩。
 
 `refresh_X(session, client, symbols, *, only_stale=True)` —— `only_stale=True`(默认)等价于在函数顶部跑一遍 `symbols = stale_symbols(session, "<scope>", symbols)`。CLI 层 `qr data refresh` 在 `--force` 缺省时按这个路径走;`--force` 时 CLI 自己用 `targets` 跳过 filter 并显式传 `only_stale=False`(避免函数层重做一次)。
+
+**MA-5:`refresh_ratios` 调两个 endpoint。** `ROE / ROA / fcf_yield` 不在 FMP `/ratios` 里(几乎总是 None),它们住在 `/key-metrics`。所以 `refresh_ratios` 每个 period 抓 `/ratios` **和** `/key-metrics`,用 `_key_metrics_by_date` 按 `fiscal_date` join,`_merge_key_metrics` 把这三个字段回填进 ratio 行 —— **仅当 /ratios 该字段为 None 时**(防御:万一 FMP 哪天在 /ratios 自己填了,以 /ratios 为准)。`/key-metrics` 失败(如付费 plan 不含 → 402)走 **per-period hard-fail**(symbol `ok=False`,错误带 `key-metrics:` 前缀),但 `/ratios` 行照常入库 —— 跟 §12 一致,**不**走 news 那种软失败,因为这三个是 MB 筛选的 first-class 字段。`/key-metrics` 还返回 `returnOnInvestedCapital` / `earningsYield`,但加列要手工 ALTER(见"Schema 演进"),留给 MG。
 
 ### 7. MB 筛选 — AST sandbox + 命名 DSL
 
