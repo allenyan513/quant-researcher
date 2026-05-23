@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics` 补全 ROE/ROA/fcf_yield(详见 §6 末尾);**MH**(回测)整包移植 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。**后续(本批)**:`financial_ratios` 加 `return_on_invested_capital` / `earnings_yield` 两列(screen 字段 `roic` / `earnings_yield`);新增 `qr morningcall`(组合晨报,§14)+ `qr earnings`(财报 actual-vs-est + 论点,§15);backtest 注册表补 buy_and_hold / macd_crossover / bollinger_reversion / rsi_reversion / donchian_breakout(均单标的)。
+代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH + MG 已建**(v1 八能力域全闭环)。**MA-5** `/key-metrics` 补全 ROE/ROA/fcf_yield(§6 末尾);**MH** 整包移植 quant-engine(§13);`qr morningcall`(§14)+ `qr earnings`(§15);`financial_ratios` 加 `roic` / `earnings_yield`;backtest 注册表 6 个单标的策略。**MG**(信号研究,本批):`quant_researcher/signals/`(factors 注册表 + panel + engine)+ `qr signal research/factors/list/runs/show`,算因子 IC/分位/衰减,落 `signals`/`signal_runs`(详见 §16)。
 
 ## 命令(运行前必看)
 
@@ -213,6 +213,17 @@ from quant_researcher import models  # noqa: E402, F401
 
 [`quant_researcher/research/earnings.py`](quant_researcher/research/earnings.py) `read_earnings(session, symbol, *, limit=4, transcript_excerpt=None, decision_limit=5)` 是**纯 warehouse 读**(不调 FMP、不写库;transcript 由 CLI 在线取后注入,跟 bundler 同款分离)。把最近 N 个 `IncomeStatement` actual 按共享 PK `(symbol, fiscal_date, period)` join `AnalystEstimate`,有估值就算 EPS/营收 surprise(`abs()` 分母防负估值翻号),论点只**陈列** Decision(不打分,Claude 判)。**关键 caveat**:估值是 forward + merge 覆盖的,过去期只有"当时 forward 时抓到"才有 → 历史 surprise **稀疏**;`estimate_available` / `estimates_matched` 把覆盖率摆明,绝不在没估值时暗示 beat/miss。`--transcript` 在线取(402-safe)。
 
+### 16. MG 信号研究 — 因子 IC/分位/衰减(features §G)
+
+[`quant_researcher/signals/`](quant_researcher/signals/) 三层:`factors.py`(`REGISTRY` 因子注册表)+ `panel.py`(仓库 I/O + 点位面板)+ `engine.py`(`run_signal` 唯一入口 + IC/分位/衰减数学 + 持久化)。`qr signal research --factor <name>` 在月度 rebalance 日给全 universe 按因子排名,量它对**前瞻收益**的预测力。
+
+- **因子注册表**(`factors.py`):`fundamental` 复用 `screen.expression.FIELDS`(因子名 → financial_ratios 列)+ `price`(`momentum_12_1/6_1`、`reversal_1m`、`realized_vol_3m`,从 `PriceSeries` 算)。`direction`(±1/0)仅用于报告对齐多空,**不**翻原始 IC。
+- **点位正确(PIT)是命根**(`panel.py`):基本面值走 `FinancialRatios → IncomeStatement` join 按 `IncomeStatement.known_at`(= 真 acceptedDate)`<= rebalance_date` 过滤 —— **不**能用 `FinancialRatios.known_at`(是 ingestion 时间,会泄漏未来)。价格因子只用 `<= anchor` 的 bar。前瞻收益用 calendar-day `HORIZON_DAYS`;动量用 trading-day 行偏移(252/126/21)。
+- **效率**:`load_price_panel` 一次查询把每票价格序列灌进 numpy `PriceSeries`(`adj_close`、3 天 staleness),之后 forward-return/动量全是内存 bisect,不走 per-(symbol,date) 查询。
+- **数学**(`engine.py`,全程过 `backtest.runner._to_jsonable` 防 numpy/inf/nan):IC = 每日 `scipy.stats.spearmanr`(**算前先 strip None/NaN 对**,constant 输入 → nan → 丢该日);summary 出 mean/std/IR/t-stat/hit-rate;分位 `argsort`+`array_split` 等量分桶 → 桶均收益 + 多空价差(raw + direction-aligned)+ monotonicity;衰减 = 各 horizon 的 mean IC。
+- **诚实 coverage block**(必带):2 年价格 + 每股 ~2 个年报 → 基本面因子**准静态**(distinct 截面少、IC 自相关、t-stat 虚高)。`coverage.warnings` 在 fundamental quasi-static / n_dates<6 / avg_symbols<10 时明确警告 —— **绝不在没估值/样本薄时夸大 IC**。CLI 原样吐 `coverage`。
+- **持久化**:`Signal`(定义)+ `SignalRun`(run_id uuid + ic_summary/quantiles/decay/coverage JSON),仿 Screen/ScreenRun。
+
 ## 文件地图
 
 ```
@@ -230,6 +241,7 @@ quant_researcher/
 │                      唯一 qr 专属新增文件
 ├── backtest/          MH:qr 编排层(runner.py 唯一入口 + strategies/ 注册表 + loader.py)
 ├── research/          bundler.py(数据包,§10)+ morningcall.py(§14)+ earnings.py(§15)
+├── signals/           MG:factors.py(注册表)+ panel.py(PIT 面板)+ engine.py(IC/分位/衰减,§16)
 └── models/            每文件一/数个 model;__init__.py re-export = 注册
 tests/                 mirror 上面结构;in-memory SQLite + MagicMock(spec=FMPClient)
 docs/                  features.md + implementation-plan.md(改设计前先改这里)

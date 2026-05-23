@@ -9,7 +9,7 @@ MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 `income_statement`, `balance_sheet`, `cash_flow`, `financial_ratios`,
 `analyst_estimates`. MB: `screens`, `screen_runs`. MC: `valuation_snapshots`.
 ME: `holdings`. MD: `news_items`, `research_bundles`. MF: `decisions`,
-`decision_tracking`. MH: `backtest_runs`.
+`decision_tracking`. MH: `backtest_runs`. MG: `signals`, `signal_runs`.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.models.research import NewsItem, ResearchBundle
 from quant_researcher.models.screens import Screen, ScreenRun
 from quant_researcher.models.securities import Security
+from quant_researcher.models.signals import Signal, SignalRun
 from quant_researcher.models.universe import UniverseMember
 from quant_researcher.models.valuation import ValuationSnapshot
 
@@ -47,6 +48,8 @@ __all__ = [
     "Screen",
     "ScreenRun",
     "Security",
+    "Signal",
+    "SignalRun",
     "UniverseMember",
     "ValuationSnapshot",
 ]
