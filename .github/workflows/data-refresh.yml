@@ -1,0 +1,64 @@
+name: Data refresh
+
+# Scheduled warehouse refresh (Type-A mechanical, no judgment needed).
+# Reads the universe from Supabase (the `universe` table), so it does NOT need
+# config/watchlist.txt (which is gitignored). Writes only to Supabase — never
+# commits to the repo.
+#
+# Requires two repo secrets (Settings → Secrets and variables → Actions):
+#   QR_DATABASE_URL   — Supabase Postgres DSN
+#   FMP_API_KEY       — Financial Modeling Prep key
+# pydantic-settings reads these straight from the environment (no .env needed).
+#
+# GitHub cron is UTC and may be delayed/skipped under load — fine for EOD data.
+# Times chosen to be safely after the US close in both EST and EDT.
+
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"   # weekdays 23:00 UTC (~19:00 EDT / 18:00 EST) — daily prices
+    - cron: "0 8 * * 6"      # Saturday 08:00 UTC — weekly fundamentals + decision tracking
+  workflow_dispatch: {}       # manual trigger (also runs both jobs, for testing)
+
+concurrency:
+  group: data-refresh
+  cancel-in-progress: false
+
+env:
+  QR_DATABASE_URL: ${{ secrets.QR_DATABASE_URL }}
+  FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+jobs:
+  daily-quotes:
+    # weekday cron + manual dispatch
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 23 * * 1-5'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Refresh daily quotes
+        run: uv run qr data refresh --scope quote
+
+  weekly-fundamentals:
+    # Saturday cron + manual dispatch
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 8 * * 6'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Refresh fundamentals (annual; only-stale skips fresh rows)
+        run: |
+          uv run qr data refresh --scope financials --periods annual
+          uv run qr data refresh --scope ratios --periods annual
+          uv run qr data refresh --scope estimates --periods annual
+      - name: Track decision forward-returns
+        run: uv run qr ledger track
