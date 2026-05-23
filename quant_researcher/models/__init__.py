@@ -9,11 +9,12 @@ MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 `income_statement`, `balance_sheet`, `cash_flow`, `financial_ratios`,
 `analyst_estimates`. MB: `screens`, `screen_runs`. MC: `valuation_snapshots`.
 ME: `holdings`. MD: `news_items`, `research_bundles`. MF: `decisions`,
-`decision_tracking`.
+`decision_tracking`. MH: `backtest_runs`.
 """
 
 from __future__ import annotations
 
+from quant_researcher.models.backtest import BacktestRun
 from quant_researcher.models.decisions import Decision, DecisionTracking
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
@@ -29,6 +30,7 @@ from quant_researcher.models.valuation import ValuationSnapshot
 
 __all__ = [
     "AnalystEstimate",
+    "BacktestRun",
     "BalanceSheet",
     "CashFlow",
     "DailyPrice",

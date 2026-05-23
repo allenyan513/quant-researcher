@@ -89,7 +89,7 @@ quant-researcher/
 - **MC 估值(C)**:WACC(Bloomberg 调整 β + sector_betas + FRED/兜底 4.5%);DCF-FCFF(增长/EBITDA 退出)、PEG、P/E·EV/EBITDA·EV/Rev 倍数、EPV、DDM;5×5 敏感性;假设可覆盖;快照持久化。
 - **MD/ME/MF**:`research bundle`/`earnings read` 聚合器(含 insider/13F/analyst/transcript)→ 数据包+快照;`holdings`(先 CSV,后 IBKR Flex Python 重写)+ `morningcall` 数据包;决策账本(入账即快照当时数据 + track 1w/1m/3m/6m vs SPY+行业ETF + scorecard 按论点/行业/信心)。
 - **MG 信号(G)**:假设规格 → 宇宙+历史算因子 → IC/分位/衰减 → 版本化信号(反哺 B/F/H)。
-- **MH 回测(H)**:移植 `engine/` 簇;实现 `WarehouseDataFeed(DataFeed).fetch()` 读 `daily_prices`;`qr backtest run` → 指标/成交/净值 + run 持久化。
+- **MH 回测(H)** ✅(2026-05-22):quant-engine **整包移植**到 `quant_researcher/engine/`(38 文件,改 import 前缀;丢弃 export/optimize/charts/cached_feed;去 yfinance);`WarehouseDataFeed(DataFeed).fetch()` 读 `daily_prices`(默认 adj_close 回调 OHLC);`quant_researcher/backtest/`(runner + 策略注册表 + `--strategy-file` loader);`qr backtest run/list/show` → 指标/成交/净值 + `backtest_runs` 持久化。risk/margin 移植但 CLI v1 不接。新依赖 scipy。上游 235 测试整包移植 + 21 qr 专属测试。详见 CLAUDE.md §13。
 
 ## 8. 复用映射(关键路径)
 
