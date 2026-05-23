@@ -79,6 +79,16 @@ def test_build_morning_call_portfolio_aggregates(session: Session) -> None:
     assert aapl["decision"]["side"] == "buy"
 
 
+def test_pct_uses_abs_denominator_for_shorts() -> None:
+    from quant_researcher.research.morningcall import _pct
+
+    assert _pct(50.0, 200.0) == 25.0  # normal long unchanged
+    # short: loss (neg pnl) on negative cost basis must stay NEGATIVE
+    assert _pct(-100.0, -1000.0) == -10.0
+    assert _pct(5.0, 0) is None
+    assert _pct(None, 200.0) is None
+
+
 def test_build_morning_call_empty_holdings(session: Session) -> None:
     mc = build_morning_call(session, account="NOPE")
     assert mc["holdings_count"] == 0

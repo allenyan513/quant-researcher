@@ -303,9 +303,12 @@ def _sum_floats(items: list[dict[str, Any]], key: str) -> float | None:
 
 
 def _pct(num: float | None, denom: float | None) -> float | None:
+    # abs(denom) so the sign tracks the numerator — critical for short positions
+    # / net-short books where cost basis (the denominator) is negative: a loss
+    # on a short (neg pnl ÷ neg cost) must stay negative, not flip positive.
     if num is None or not denom:
         return None
-    return num / denom * 100
+    return num / abs(denom) * 100
 
 
 def _pct_change(latest: float | None, prev: float | None) -> float | None:
