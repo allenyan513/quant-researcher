@@ -78,6 +78,13 @@ backtest_app = typer.Typer(
 )
 app.add_typer(backtest_app)
 
+signal_app = typer.Typer(
+    name="signal",
+    help="Factor/signal research (MG) — IC / quantiles / decay.",
+    no_args_is_help=True,
+)
+app.add_typer(signal_app)
+
 # ---------------------------------------------------------------------------
 # qr holdings ...
 # ---------------------------------------------------------------------------
@@ -1204,6 +1211,219 @@ def earnings_cmd(
         if transcript:
             freshness["fmp"] = "live"
         _emit(Envelope.success(data=data, data_freshness=freshness))
+
+
+# ---------------------------------------------------------------------------
+# qr signal ...  (MG — factor research)
+# ---------------------------------------------------------------------------
+
+
+@signal_app.command("research")
+def signal_research(
+    factor: str = typer.Option(
+        ..., "--factor", "-f", help="Factor name (see `qr signal factors`)."
+    ),
+    horizon: str = typer.Option(
+        "1m", "--horizon", help="Primary forward horizon for IC/quantiles: 1w|1m|3m|6m."
+    ),
+    quantiles: int = typer.Option(
+        5, "--quantiles", "-q", help="Number of quantile buckets (>= 2)."
+    ),
+    rebalance: str = typer.Option(
+        "monthly", "--rebalance", help="Rebalance frequency: monthly | weekly."
+    ),
+    symbols: str | None = typer.Option(
+        None, "--symbols", help="Comma-separated subset (default: full universe)."
+    ),
+    name: str | None = typer.Option(
+        None, "--name", "-n", help="Save the signal definition under this name."
+    ),
+    description: str | None = typer.Option(
+        None, "--description", help="Stored only when --name is given."
+    ),
+) -> None:
+    """Compute a factor's IC / quantile spread / decay over the universe; persist."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.ledger.engine import HORIZON_DAYS
+    from quant_researcher.signals.engine import run_signal
+    from quant_researcher.signals.factors import FactorError
+
+    # --- validation OUTSIDE try (CLAUDE.md §2) ---
+    if horizon not in HORIZON_DAYS:
+        _emit(
+            Envelope.failure(
+                "invalid_horizon", f"--horizon must be one of {list(HORIZON_DAYS)}"
+            )
+        )
+    if quantiles < 2:
+        _emit(Envelope.failure("invalid_quantiles", "--quantiles must be >= 2"))
+    if rebalance not in ("monthly", "weekly"):
+        _emit(Envelope.failure("invalid_rebalance", "--rebalance must be monthly|weekly"))
+    target = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            result = run_signal(
+                sess,
+                factor=factor,
+                horizon=horizon,
+                quantiles=quantiles,
+                rebalance=rebalance,
+                symbols=target,
+                save_name=name,
+                description=description,
+            )
+    except FactorError as exc:
+        _emit(Envelope.failure("invalid_factor", str(exc)))
+    except ValueError as exc:
+        _emit(Envelope.failure("signal_research_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("signal_research_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "run_id": result.run_id,
+                    "signal_name": result.signal_name,
+                    "factor": result.factor,
+                    "kind": result.kind,
+                    "horizon": result.horizon,
+                    "quantiles": result.quantiles,
+                    "rebalance": result.rebalance,
+                    "universe_size": result.universe_size,
+                    "ic_summary": result.ic_summary,
+                    "quantiles_result": result.quantiles_result,
+                    "decay": result.decay,
+                    "coverage": result.coverage,
+                },
+                data_freshness={"warehouse": "live"},
+            )
+        )
+
+
+@signal_app.command("factors")
+def signal_factors() -> None:
+    """List the built-in factor registry (name / kind / direction)."""
+    from quant_researcher.signals.factors import list_factors
+
+    factors = list_factors()
+    _emit(
+        Envelope.success(
+            data={"count": len(factors), "factors": factors},
+            data_freshness={"code": "live"},
+        )
+    )
+
+
+@signal_app.command("list")
+def signal_list() -> None:
+    """List saved signal definitions."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.signals import Signal
+
+    try:
+        with session_factory()() as sess:
+            rows = list(sess.scalars(select(Signal).order_by(Signal.name)))
+            items = [
+                {
+                    "name": s.name,
+                    "factor": s.factor,
+                    "params": s.params,
+                    "description": s.description,
+                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                }
+                for s in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("signal_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "signals": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@signal_app.command("runs")
+def signal_runs(
+    name: str | None = typer.Option(None, "--name", "-n", help="Filter by saved signal."),
+    factor: str | None = typer.Option(None, "--factor", "-f", help="Filter by factor."),
+    limit: int = typer.Option(20, "--limit", "-l", help="Newest-first row cap."),
+) -> None:
+    """List signal-research runs (newest first) with headline IC."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.signals import SignalRun
+
+    try:
+        with session_factory()() as sess:
+            stmt = select(SignalRun).order_by(SignalRun.ran_at.desc()).limit(limit)
+            if name:
+                stmt = stmt.where(SignalRun.signal_name == name)
+            if factor:
+                stmt = stmt.where(SignalRun.factor == factor)
+            rows = list(sess.scalars(stmt))
+            items = [
+                {
+                    "run_id": r.run_id,
+                    "signal_name": r.signal_name,
+                    "factor": r.factor,
+                    "kind": r.kind,
+                    "horizon": (r.params or {}).get("horizon"),
+                    "mean_ic": (r.ic_summary or {}).get("mean_ic"),
+                    "n_dates": (r.ic_summary or {}).get("n_dates"),
+                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("signal_runs_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "runs": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@signal_app.command("show")
+def signal_show(
+    run_id: str = typer.Argument(..., help="Signal run UUID."),
+) -> None:
+    """Show one signal run in full (IC / quantiles / decay / coverage)."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.signals import SignalRun
+
+    try:
+        with session_factory()() as sess:
+            r = sess.get(SignalRun, run_id)
+            data = None
+            if r is not None:
+                data = {
+                    "run_id": r.run_id,
+                    "signal_name": r.signal_name,
+                    "factor": r.factor,
+                    "kind": r.kind,
+                    "params": r.params,
+                    "ic_summary": r.ic_summary,
+                    "quantiles": r.quantiles,
+                    "decay": r.decay,
+                    "coverage": r.coverage,
+                    "universe_size": r.universe_size,
+                    "code_version": r.code_version,
+                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                }
+    except Exception as exc:
+        _emit(Envelope.failure("signal_show_failed", str(exc)))
+    else:
+        if data is None:
+            _emit(Envelope.failure("not_found", f"no signal run {run_id!r}"))
+        _emit(Envelope.success(data=data, data_freshness={"db": "live"}))
 
 
 # ---------------------------------------------------------------------------
