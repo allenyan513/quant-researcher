@@ -174,15 +174,20 @@ def calculate_metrics(
     # 收益率序列
     returns = np.diff(equities) / equities[:-1]
 
-    # 总收益
-    total_return = (equities[-1] / equities[0]) - 1
+    # 总收益 (qr port: guard equities[0]==0)
+    total_return = (equities[-1] / equities[0]) - 1 if equities[0] != 0 else 0.0
 
     # 年化收益 (假设252个交易日)
+    # qr port: guard zero initial equity (÷0) and non-positive ratio (fractional
+    # power of a negative → complex; happens with wiped-out / negative equity).
     n_days = (timestamps[-1] - timestamps[0]).days
-    if n_days > 0:
-        cagr = (equities[-1] / equities[0]) ** (365 / n_days) - 1
-    else:
+    ratio = (equities[-1] / equities[0]) if equities[0] != 0 else 0.0
+    if n_days <= 0:
         cagr = 0.0
+    elif ratio > 0:
+        cagr = ratio ** (365 / n_days) - 1
+    else:
+        cagr = -1.0  # total loss / negative equity
 
     # 最大回撤
     peak = np.maximum.accumulate(equities)
@@ -216,6 +221,9 @@ def calculate_metrics(
 
     # Probabilistic Sharpe Ratio (PSR)
     # PSR = Φ((Sharpe - 0) * sqrt(n-1) / sqrt(1 - skew*Sharpe + (kurt-1)/4 * Sharpe^2))
+    # where `kurt` is Pearson kurtosis (normal = 3). scipy's kurtosis(fisher=True)
+    # returns EXCESS kurtosis (kurt - 3), so (kurt - 1) == (excess_kurt + 2).
+    # qr port: upstream used (excess_kurt)/4 here, which is wrong by 2/4·SR².
     from scipy.stats import kurtosis as _kurt_fn
     from scipy.stats import norm as _norm
     from scipy.stats import skew as _skew_fn
@@ -223,7 +231,9 @@ def calculate_metrics(
     if n > 2 and returns.std() > 0:
         skewness = float(_skew_fn(returns))
         excess_kurt = float(_kurt_fn(returns, fisher=True))
-        denom = max(1e-10, (1 - skewness * sharpe + (excess_kurt) / 4 * sharpe ** 2)) ** 0.5
+        denom = max(
+            1e-10, (1 - skewness * sharpe + (excess_kurt + 2) / 4 * sharpe**2)
+        ) ** 0.5
         psr = float(_norm.cdf(sharpe * ((n - 1) ** 0.5) / denom))
     else:
         psr = 0.0

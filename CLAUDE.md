@@ -201,6 +201,10 @@ from quant_researcher import models  # noqa: E402, F401
 
 **依赖**:移植引入 `scipy`(metrics 的 PSR/skew/kurtosis)。**测试**:`tests/engine/` 是上游测试整包移植(235 个,验证移植正确性,改 import 即可);qr 专属在 `tests/test_warehouse_feed.py` / `test_backtest_runner.py` / `test_backtest_cli.py`。
 
+**已知限制(upstream,v1 不碰、暂不修)** —— PR #6 review 标出,因偏离 upstream 风险大且 v1 用不到而**故意延后**(真要修先在 quant-engine 上游改再 sync):
+- **多标的 bar 错位 → 前视偏差**(`engine.py` 事件循环):循环按 `range(max_bars)` 对每个 symbol 各自 `advance()`,**假设所有标的 bar 完全对齐**。若某标的有缺口(停牌/上市晚),它的 bar 会相对其他标的"左移",同一 `on_bar` 里看到不同日期的价格。v1 只有单标的 `sma_crossover`,且 warehouse 是美股共享交易日历(同期标的天然对齐),不触发;**多标的策略(走 `--strategy-file`)要自己保证标的历史齐全**。正解是按"全标的去重排序时间轴"迭代。
+- **STOP_LIMIT 触发态不持久**(`broker.py` `_fill_stop_limit`):stop 触发后若当根 bar limit 没成交,只 return None 而**没转成 LIMIT 单**,下根 bar 重新判 trigger —— 价格回到 stop 另一侧会"un-trigger"。v1 只用市价单(`buy`/`sell`),不碰;用 `set_stop_loss` 等止损的自定义策略要注意。正解是触发后把 order 状态置为已触发并转 LIMIT。
+
 ## 文件地图
 
 ```

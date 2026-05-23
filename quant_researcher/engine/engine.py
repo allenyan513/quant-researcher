@@ -107,6 +107,9 @@ class BacktestEngine:
 
         # Step 3: 事件循环
         # 找出所有标的的最大 bar 数量来确定循环次数
+        # qr port: guard empty symbol list so max() doesn't ValueError.
+        if not self.symbols:
+            return self.portfolio
         max_bars = max(
             len(self.bar_data._bars[s]) for s in self.symbols
         )
