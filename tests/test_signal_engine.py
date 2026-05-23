@@ -63,6 +63,13 @@ def test_summarize_ic_guards() -> None:
     assert one["ic_std"] is None and one["ic_ir"] is None and one["t_stat"] is None
 
 
+def test_hit_rate_is_direction_aware() -> None:
+    neg = [-0.1, -0.2, -0.05]  # consistently negative IC
+    assert _summarize_ic(neg, direction=-1)["hit_rate"] == pytest.approx(1.0)  # works for -1
+    assert _summarize_ic(neg, direction=1)["hit_rate"] == pytest.approx(0.0)
+    assert _summarize_ic(neg, direction=0)["hit_rate"] == pytest.approx(0.0)  # agnostic = raw >0
+
+
 def test_min_symbols_drops_thin_dates() -> None:
     factor = _panel({f"S{i}": float(i) for i in range(3)})  # only 3 symbols
     fwd = _panel({f"S{i}": float(i) for i in range(3)})

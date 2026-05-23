@@ -87,7 +87,7 @@ def _realized_vol_3m(series: PriceSeries, anchor: date) -> float | None:
     if idx is None or idx < 63:
         return None
     window = series.prices[idx - 63 : idx + 1]
-    window = window[~np.isnan(window)]
+    window = window[window > 0]  # drops NaN + non-positive (guards log)
     if len(window) < 30:
         return None
     log_ret = np.diff(np.log(window))

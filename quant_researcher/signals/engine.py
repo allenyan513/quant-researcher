@@ -88,7 +88,7 @@ def run_signal(
 
     fwd_primary = _fwd_at_horizon(fwd_panel, dates, horizon)
     ics = [ic for _d, ic in _ic_series(factor_panel, fwd_primary, dates, min_symbols)]
-    ic_summary = _summarize_ic(ics)
+    ic_summary = _summarize_ic(ics, direction=spec.direction)
     quantiles_result = _quantile_buckets(
         factor_panel, fwd_primary, dates, quantiles, spec.direction
     )
@@ -216,7 +216,7 @@ def _ic_series(
     return out
 
 
-def _summarize_ic(ics: list[float]) -> dict[str, Any]:
+def _summarize_ic(ics: list[float], direction: int = 0) -> dict[str, Any]:
     k = len(ics)
     if k == 0:
         return {
@@ -228,12 +228,16 @@ def _summarize_ic(ics: list[float]) -> dict[str, Any]:
     std = float(arr.std(ddof=1)) if k >= 2 else None
     ir = (mean_ic / std) if std else None
     t_stat = (ir * np.sqrt(k)) if ir is not None else None
+    # hit_rate = fraction of dates the IC matched the factor's EXPECTED sign
+    # (raw IC>0 when direction is agnostic). A −1 factor that works has IC<0,
+    # so a raw ">0" rate would read ~0 and mislead. mean_ic/IR/t_stat stay raw.
+    hit = (arr < 0).mean() if direction < 0 else (arr > 0).mean()
     return {
         "mean_ic": mean_ic,
         "ic_std": std,
         "ic_ir": ir,
         "t_stat": t_stat,
-        "hit_rate": float((arr > 0).mean()),
+        "hit_rate": float(hit),
         "n_dates": k,
     }
 
