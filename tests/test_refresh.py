@@ -539,7 +539,9 @@ def test_refresh_ratios_merges_key_metrics(session: Session, fmp: MagicMock) -> 
             "period": "FY",
             "returnOnEquity": 1.5,
             "returnOnAssets": 0.3,
+            "returnOnInvestedCapital": 0.45,
             "freeCashFlowYield": 0.04,
+            "earningsYield": 0.035,
         }
     ]
     refresh_ratios(session, fmp, ["AAPL"], periods=("annual",))
@@ -550,7 +552,9 @@ def test_refresh_ratios_merges_key_metrics(session: Session, fmp: MagicMock) -> 
     assert row.pe_ratio == 28.5  # from /ratios
     assert row.return_on_equity == 1.5  # backfilled from /key-metrics
     assert row.return_on_assets == 0.3
+    assert row.return_on_invested_capital == 0.45
     assert row.fcf_yield == 0.04
+    assert row.earnings_yield == 0.035
 
 
 def test_refresh_ratios_keeps_ratios_value_over_key_metrics(

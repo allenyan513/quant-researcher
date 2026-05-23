@@ -462,16 +462,18 @@ def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
             or row.get("debtEquityRatio")
             or row.get("debtToEquity")
         ),
-        # ROE/ROA usually absent from /ratios — backfilled from /key-metrics.
+        # ROE/ROA/ROIC usually absent from /ratios — backfilled from /key-metrics.
         "return_on_equity": _as_float(row.get("returnOnEquity")),
         "return_on_assets": _as_float(row.get("returnOnAssets")),
+        "return_on_invested_capital": _as_float(row.get("returnOnInvestedCapital")),
         "gross_margin": _as_float(row.get("grossProfitMargin")),
         "operating_margin": _as_float(row.get("operatingProfitMargin")),
         "net_margin": _as_float(
             row.get("netProfitMargin") or row.get("bottomLineProfitMargin")
         ),
-        # fcf_yield absent from /ratios — backfilled from /key-metrics.
+        # fcf_yield / earnings_yield absent from /ratios — from /key-metrics.
         "fcf_yield": _as_float(row.get("freeCashFlowYield")),
+        "earnings_yield": _as_float(row.get("earningsYield")),
         "payout_ratio": _as_float(
             row.get("dividendPayoutRatio") or row.get("payoutRatio")
         ),
@@ -485,7 +487,9 @@ def _ratio_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
 _KEY_METRIC_FIELDS = {
     "return_on_equity": "returnOnEquity",
     "return_on_assets": "returnOnAssets",
+    "return_on_invested_capital": "returnOnInvestedCapital",
     "fcf_yield": "freeCashFlowYield",
+    "earnings_yield": "earningsYield",
 }
 
 
@@ -504,7 +508,8 @@ def _key_metrics_by_date(rows: list[dict[str, Any]]) -> dict[date, dict[str, Any
 
 
 def _merge_key_metrics(mapped: dict[str, Any], km_row: dict[str, Any] | None) -> None:
-    """Backfill ROE/ROA/fcf_yield from /key-metrics, in place.
+    """Backfill `_KEY_METRIC_FIELDS` (ROE/ROA/ROIC/fcf_yield/earnings_yield)
+    from /key-metrics, in place.
 
     Only fills columns /ratios left None — a non-null /ratios value wins
     (defensive: don't clobber a real value if FMP starts returning these).

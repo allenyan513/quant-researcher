@@ -189,10 +189,12 @@ def build_symbol_state(
                 "debt_equity": r.debt_to_equity,
                 "roe": r.return_on_equity,
                 "roa": r.return_on_assets,
+                "roic": r.return_on_invested_capital,
                 "gross_margin": r.gross_margin,
                 "operating_margin": r.operating_margin,
                 "net_margin": r.net_margin,
                 "fcf_yield": r.fcf_yield,
+                "earnings_yield": r.earnings_yield,
             }
         )
 

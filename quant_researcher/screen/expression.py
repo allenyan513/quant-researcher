@@ -78,10 +78,12 @@ FIELDS: dict[str, str] = {
     "debt_equity": "financial_ratios.debt_to_equity",
     "roe": "financial_ratios.return_on_equity",
     "roa": "financial_ratios.return_on_assets",
+    "roic": "financial_ratios.return_on_invested_capital",
     "gross_margin": "financial_ratios.gross_margin",
     "operating_margin": "financial_ratios.operating_margin",
     "net_margin": "financial_ratios.net_margin",
     "fcf_yield": "financial_ratios.fcf_yield",
+    "earnings_yield": "financial_ratios.earnings_yield",
     # daily_prices (latest trade_date per symbol)
     "close": "daily_prices.close",
 }
