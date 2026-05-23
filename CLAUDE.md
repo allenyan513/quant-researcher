@@ -9,7 +9,7 @@
 - [`docs/features.md`](docs/features.md) — 需求 v1.0,**决策记录 D1–D11**。需求改了 → 这里加新 D。
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) — 实现 v1.0,**I1–I8 + 里程碑 M0–MH**。实现策略变了 → 这里改。
 
-代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF 已合并 master**,下一里程碑是 **MG**(信号研究)或 **MH**(回测,移植 quant-engine)。ME 的 morningcall 数据包仍延后。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics`,补全 ROE/ROA/fcf_yield(详见 §6 末尾)。
+代码现状:**M0 + MA(含 MA-5)+ MB + MC + ME(持仓部分)+ MD + MF + MH 已合并 master**,下一里程碑是 **MG**(信号研究)。ME 的 morningcall 数据包仍延后。**MA-5** 给 `refresh_ratios` 接上 `/key-metrics` 补全 ROE/ROA/fcf_yield(详见 §6 末尾);**MH**(回测)整包移植 quant-engine 到 `quant_researcher/engine/`,加 `WarehouseDataFeed` + `qr backtest run/list/show`(详见 §13)。
 
 ## 命令(运行前必看)
 
@@ -188,6 +188,23 @@ from quant_researcher import models  # noqa: E402, F401
 
 参考 `refresh_financials` 实现 + `tests/test_refresh.py::test_refresh_financials_isolates_per_*`。
 
+### 13. MH 回测 — 整包移植 quant-engine + warehouse feed + 持久化
+
+**`quant_researcher/engine/` 是 quant-engine 的整包移植**(verbatim,只改 `engine.*` → `quant_researcher.engine.*` import 前缀)。**改它前先想清楚是否要保持与上游可 re-sync** —— 大改动会让以后同步上游变难。已做的最小改动只有三处:① `data/data_feed.py` 删掉 `YFinanceFeed`(去 yfinance 依赖,留 `DataFeed` ABC + `CSVFeed`);② `analytics/metrics.py` 删掉 yfinance/matplotlib 版本上报;③ `engine.py` 的 `_fetch_spy_benchmark` 改为从注入的 `data_feed` 读 `benchmark_symbol`(原版用 yfinance 自动拉 SPY),并加 `verbose` 旗标(默认 True;CLI 路径传 `verbose=False` 静默 print,保 §1 单信封)。**丢弃**了 `export/ optimize/ data/cached_feed.py analytics/{chart,enhanced_charts,report}.py`(charting/QC/walk-forward 不在 v1)。risk/margin/stop 模块**移植了但 CLI v1 不接**(`risk_manager=None`)。
+
+**qr 专属编排在 `quant_researcher/backtest/`**(不污染 engine 包,re-sync 友好):
+- `engine/data/warehouse_feed.py` — `WarehouseDataFeed(DataFeed).fetch()` 读 `daily_prices` → `Bar`。**默认 `adjusted=True`**:用 `factor = adj_close/close` 把整根 OHLC 回调(split/dividend 正确),`close = adj_close`;`adj_close` 缺失 → factor=1;无 close 的行跳过。`--raw` 关掉。这是放在 engine/data/ 的唯一 qr 专属文件(additive,不与上游冲突)。
+- `backtest/strategies/` — 内置策略注册表(`REGISTRY` dict,v1 只有 `sma_crossover`)。加内置策略:丢个 module + 在 `REGISTRY` 注册(keys 也驱动 CLI 错误里的 "valid:" 列表)。
+- `backtest/loader.py` — `--strategy-file` 用 importlib 加载外部 `.py` 里的 `BaseStrategy` 子类(**本地执行,不沙箱** —— 跟本地跑任意脚本同信任级别)。
+- `backtest/runner.py` — `run_backtest(...)` 唯一入口(CLI + Python 都走它)。解析策略(file 优先于 registry name)→ 单 symbol 策略自动注入 `symbols[0]` → 跑 `BacktestEngine(verbose=False)` → `calculate_metrics` → 写一行 `backtest_runs` → 返回 envelope-friendly summary(**不含** equity_curve/trade_log 大字段,那俩进 DB 由 `qr backtest show` 取)。
+- **JSON 序列化两个坑**(都在 runner 处理):`calculate_metrics` 出 **numpy 标量** → `_to_jsonable` 转原生;`profit_factor` 等可能是 **inf/nan** → 转 None(Postgres JSONB 拒绝 Infinity)。新增写进 `backtest_runs` JSON 列的字段都要过 `_to_jsonable`/`_num`。
+
+**依赖**:移植引入 `scipy`(metrics 的 PSR/skew/kurtosis)。**测试**:`tests/engine/` 是上游测试整包移植(235 个,验证移植正确性,改 import 即可);qr 专属在 `tests/test_warehouse_feed.py` / `test_backtest_runner.py` / `test_backtest_cli.py`。
+
+**已知限制(upstream,v1 不碰、暂不修)** —— PR #6 review 标出,因偏离 upstream 风险大且 v1 用不到而**故意延后**(真要修先在 quant-engine 上游改再 sync):
+- **多标的 bar 错位 → 前视偏差**(`engine.py` 事件循环):循环按 `range(max_bars)` 对每个 symbol 各自 `advance()`,**假设所有标的 bar 完全对齐**。若某标的有缺口(停牌/上市晚),它的 bar 会相对其他标的"左移",同一 `on_bar` 里看到不同日期的价格。v1 只有单标的 `sma_crossover`,且 warehouse 是美股共享交易日历(同期标的天然对齐),不触发;**多标的策略(走 `--strategy-file`)要自己保证标的历史齐全**。正解是按"全标的去重排序时间轴"迭代。
+- **STOP_LIMIT 触发态不持久**(`broker.py` `_fill_stop_limit`):stop 触发后若当根 bar limit 没成交,只 return None 而**没转成 LIMIT 单**,下根 bar 重新判 trigger —— 价格回到 stop 另一侧会"un-trigger"。v1 只用市价单(`buy`/`sell`),不碰;用 `set_stop_loss` 等止损的自定义策略要注意。正解是触发后把 order 状态置为已触发并转 LIMIT。
+
 ## 文件地图
 
 ```
@@ -200,6 +217,10 @@ quant_researcher/
 ├── data/
 │   ├── fmp.py         FMPClient(_get 内置限流+retry);加新 endpoint 走 _get_period_list
 │   └── refresh.py     refresh_X 函数 + 共享 RefreshResult/SymbolOutcome + _as_* 解析助手
+├── engine/            MH:quant-engine 整包移植(core/data/execution/risk/indicators/
+│                      strategy/analytics/engine.py)。改它前看 §13。warehouse_feed.py 是
+│                      唯一 qr 专属新增文件
+├── backtest/          MH:qr 编排层(runner.py 唯一入口 + strategies/ 注册表 + loader.py)
 └── models/            每文件一/数个 model;__init__.py re-export = 注册
 tests/                 mirror 上面结构;in-memory SQLite + MagicMock(spec=FMPClient)
 docs/                  features.md + implementation-plan.md(改设计前先改这里)

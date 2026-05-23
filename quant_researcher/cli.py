@@ -71,6 +71,13 @@ ledger_app = typer.Typer(
 )
 app.add_typer(ledger_app)
 
+backtest_app = typer.Typer(
+    name="backtest",
+    help="Strategy backtests (MH) — run / list / show over warehouse prices.",
+    no_args_is_help=True,
+)
+app.add_typer(backtest_app)
+
 # ---------------------------------------------------------------------------
 # qr holdings ...
 # ---------------------------------------------------------------------------
@@ -839,6 +846,241 @@ def ledger_show(
 
 # `qr value` is a top-level command (not a subgroup) — implementation-plan.md
 # §5 specifies `qr value AAPL [--model X]`.
+
+
+# ---------------------------------------------------------------------------
+# qr backtest ...
+# ---------------------------------------------------------------------------
+
+
+def _coerce_param(v: str) -> Any:
+    """Coerce a --params string value to int / float / bool / str (in order)."""
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    low = v.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    return v
+
+
+def _parse_kv_params(raw: str | None) -> dict[str, Any]:
+    """Parse 'fast_period=10,slow_period=30' into a kwargs dict."""
+    out: dict[str, Any] = {}
+    if not raw:
+        return out
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"bad --params entry {pair!r} (expected key=value)")
+        key, val = pair.split("=", 1)
+        out[key.strip()] = _coerce_param(val.strip())
+    return out
+
+
+@backtest_app.command("run")
+def backtest_run(
+    symbols: str = typer.Option(
+        ..., "--symbols", help="Comma-separated tickers to trade (e.g. 'AAPL')."
+    ),
+    start: str = typer.Option(..., "--start", help="Backtest start (YYYY-MM-DD)."),
+    end: str = typer.Option(..., "--end", help="Backtest end (YYYY-MM-DD)."),
+    strategy: str | None = typer.Option(
+        None, "--strategy", help="Built-in strategy name (e.g. sma_crossover)."
+    ),
+    strategy_file: str | None = typer.Option(
+        None,
+        "--strategy-file",
+        help="Path to a .py defining a BaseStrategy subclass (overrides --strategy).",
+    ),
+    strategy_class: str | None = typer.Option(
+        None,
+        "--strategy-class",
+        help="Class to pick when --strategy-file defines several subclasses.",
+    ),
+    params: str | None = typer.Option(
+        None,
+        "--params",
+        help="Strategy kwargs, e.g. 'fast_period=10,slow_period=30,size=100'.",
+    ),
+    cash: float = typer.Option(100_000.0, "--cash", help="Initial cash."),
+    fee: str = typer.Option(
+        "per-share", "--fee", help="Fee model: zero, per-share, percentage."
+    ),
+    slippage: float = typer.Option(
+        0.0005, "--slippage", help="Slippage rate (fraction, e.g. 0.0005)."
+    ),
+    benchmark: str | None = typer.Option(
+        None,
+        "--benchmark",
+        help="Benchmark symbol read from warehouse for alpha/beta (e.g. SPY).",
+    ),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="Use raw close instead of split/dividend-adjusted (default adjusted).",
+    ),
+    risk_free: float = typer.Option(
+        0.0, "--risk-free", help="Annual risk-free rate for Sharpe / Sortino."
+    ),
+) -> None:
+    """Run a strategy backtest over warehouse prices; persist + summarize."""
+    from datetime import date as _date
+
+    from quant_researcher.backtest.runner import run_backtest
+    from quant_researcher.db import session_factory
+
+    # --- validation (must stay OUTSIDE the try; _emit raises typer.Exit) ---
+    if not strategy and not strategy_file:
+        _emit(
+            Envelope.failure(
+                "missing_strategy", "provide --strategy or --strategy-file"
+            )
+        )
+    target_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not target_list:
+        _emit(Envelope.failure("missing_symbols", "--symbols is empty"))
+    for label, value in (("--start", start), ("--end", end)):
+        try:
+            _date.fromisoformat(value)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_date", f"{label} must be YYYY-MM-DD, got {value!r}"
+                )
+            )
+    try:
+        param_dict = _parse_kv_params(params)
+    except ValueError as exc:
+        _emit(Envelope.failure("invalid_params", str(exc)))
+
+    bench = benchmark.strip().upper() if benchmark else None
+
+    try:
+        with session_factory()() as sess, sess.begin():
+            summary = run_backtest(
+                sess,
+                strategy=strategy or "",
+                symbols=target_list,
+                start=start,
+                end=end,
+                initial_cash=cash,
+                params=param_dict,
+                fee=fee,
+                slippage_rate=slippage,
+                benchmark_symbol=bench,
+                adjusted=not raw,
+                strategy_file=strategy_file,
+                strategy_class=strategy_class,
+                risk_free_rate=risk_free,
+            )
+    except KeyError as exc:
+        _emit(
+            Envelope.failure(
+                "invalid_backtest_spec", exc.args[0] if exc.args else str(exc)
+            )
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        _emit(Envelope.failure("invalid_backtest_spec", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("backtest_run_failed", str(exc)))
+    else:
+        _emit(Envelope.success(data=summary, data_freshness={"warehouse": "live"}))
+
+
+@backtest_app.command("list")
+def backtest_list(
+    strategy: str | None = typer.Option(
+        None, "--strategy", "-s", help="Filter by strategy name."
+    ),
+    limit: int = typer.Option(50, "--limit", "-l", help="Newest-first row cap."),
+) -> None:
+    """List backtest runs (newest first) with headline metrics."""
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.backtest import BacktestRun
+
+    try:
+        with session_factory()() as sess:
+            stmt = (
+                select(BacktestRun)
+                .order_by(BacktestRun.created_at.desc())
+                .limit(limit)
+            )
+            if strategy:
+                stmt = stmt.where(BacktestRun.strategy == strategy)
+            rows = list(sess.scalars(stmt))
+            items = [
+                {
+                    "run_id": r.run_id,
+                    "strategy": r.strategy,
+                    "symbols": r.symbols,
+                    "start": r.start.isoformat() if r.start else None,
+                    "end": r.end.isoformat() if r.end else None,
+                    "benchmark_symbol": r.benchmark_symbol,
+                    "total_return": (r.metrics or {}).get("total_return"),
+                    "sharpe_ratio": (r.metrics or {}).get("sharpe_ratio"),
+                    "max_drawdown": (r.metrics or {}).get("max_drawdown"),
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        _emit(Envelope.failure("backtest_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={"count": len(items), "runs": items},
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+@backtest_app.command("show")
+def backtest_show(
+    run_id: str = typer.Argument(..., help="Backtest run UUID."),
+) -> None:
+    """Show one backtest run in full (metrics + equity curve + trades)."""
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.backtest import BacktestRun
+
+    try:
+        with session_factory()() as sess:
+            r = sess.get(BacktestRun, run_id)
+            data = None
+            if r is not None:
+                data = {
+                    "run_id": r.run_id,
+                    "strategy": r.strategy,
+                    "symbols": r.symbols,
+                    "start": r.start.isoformat() if r.start else None,
+                    "end": r.end.isoformat() if r.end else None,
+                    "initial_cash": r.initial_cash,
+                    "benchmark_symbol": r.benchmark_symbol,
+                    "params": r.params,
+                    "config": r.config,
+                    "metrics": r.metrics,
+                    "equity_curve": r.equity_curve,
+                    "trade_log": r.trade_log,
+                    "code_version": r.code_version,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+    except Exception as exc:
+        _emit(Envelope.failure("backtest_show_failed", str(exc)))
+    else:
+        # None-check + emit stay OUTSIDE the try (CLAUDE.md §2: _emit raises
+        # typer.Exit, which `except Exception` would otherwise double-emit).
+        if data is None:
+            _emit(Envelope.failure("not_found", f"no backtest run {run_id!r}"))
+        _emit(Envelope.success(data=data, data_freshness={"db": "live"}))
 
 
 # ---------------------------------------------------------------------------
