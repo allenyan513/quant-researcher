@@ -168,6 +168,7 @@ def data_env(memory_db, monkeypatch):
     fake_client.__exit__.return_value = None
     fake_client.get_profile.return_value = None
     fake_client.get_historical_prices.return_value = []
+    fake_client.get_adjusted_prices.return_value = []
     # MA-3 methods — default empty so scope=all tests don't blow up.
     fake_client.get_income_statement.return_value = []
     fake_client.get_balance_sheet.return_value = []

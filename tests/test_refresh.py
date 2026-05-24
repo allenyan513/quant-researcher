@@ -36,7 +36,11 @@ def session() -> Session:
 
 @pytest.fixture
 def fmp() -> MagicMock:
-    return MagicMock(spec=FMPClient)
+    client = MagicMock(spec=FMPClient)
+    # refresh_quotes always calls the adjusted endpoint too; default empty so
+    # quote tests that only program get_historical_prices don't blow up.
+    client.get_adjusted_prices.return_value = []
+    return client
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -265,6 +269,72 @@ def test_refresh_quotes_skips_rows_without_date(session: Session, fmp: MagicMock
     rows = list(session.scalars(select(DailyPrice).where(DailyPrice.symbol == "AAPL")))
     assert len(rows) == 1
     assert rows[0].trade_date == date(2024, 1, 2)
+
+
+def test_refresh_quotes_populates_adj_close_from_adjusted_endpoint(
+    session: Session, fmp: MagicMock
+) -> None:
+    # /full carries no adjClose (matches real FMP /stable); adj_close must come
+    # from the dividend-adjusted stream, joined by date.
+    fmp.get_historical_prices.return_value = [
+        {"date": "2024-01-02", "open": 10.0, "high": 11.0, "low": 9.0,
+         "close": 10.5, "volume": 100},
+        {"date": "2024-01-03", "open": 10.5, "high": 12.0, "low": 10.0,
+         "close": 11.0, "volume": 200},
+    ]
+    fmp.get_adjusted_prices.return_value = [
+        {"date": "2024-01-02", "adjClose": 9.8, "volume": 100},
+        {"date": "2024-01-03", "adjClose": 10.3, "volume": 200},
+    ]
+    result = refresh_quotes(session, fmp, ["AAPL"])
+    session.commit()
+
+    assert result.total_upserted == 2
+    rows = sorted(
+        session.scalars(select(DailyPrice).where(DailyPrice.symbol == "AAPL")),
+        key=lambda r: r.trade_date,
+    )
+    assert [r.close for r in rows] == [10.5, 11.0]
+    assert [r.adj_close for r in rows] == [9.8, 10.3]
+    # Adjusted stream fetched over the same window as /full.
+    assert (
+        fmp.get_adjusted_prices.call_args.kwargs["since"]
+        == fmp.get_historical_prices.call_args.kwargs["since"]
+    )
+
+
+def test_refresh_quotes_adj_close_none_when_no_adjusted_match(
+    session: Session, fmp: MagicMock
+) -> None:
+    # No adjusted row for the bar's date → adj_close stays None (panel falls
+    # back to raw close); the raw bar is still inserted.
+    fmp.get_historical_prices.return_value = [
+        {"date": "2024-01-02", "close": 10.5, "volume": 100},
+    ]
+    fmp.get_adjusted_prices.return_value = []
+    refresh_quotes(session, fmp, ["AAPL"])
+    session.commit()
+
+    row = session.scalar(select(DailyPrice).where(DailyPrice.symbol == "AAPL"))
+    assert row.close == 10.5
+    assert row.adj_close is None
+
+
+def test_refresh_quotes_adjusted_endpoint_failure_fails_symbol(
+    session: Session, fmp: MagicMock
+) -> None:
+    # An adjusted-endpoint error fails the symbol rather than storing a bar with
+    # a missing adj_close (per-symbol isolation; no rows inserted that run).
+    fmp.get_historical_prices.return_value = [
+        {"date": "2024-01-02", "close": 10.5, "volume": 100},
+    ]
+    fmp.get_adjusted_prices.side_effect = FMPError("rate limited", status_code=429)
+    result = refresh_quotes(session, fmp, ["AAPL"])
+    session.commit()
+
+    assert result.succeeded == []
+    assert [f["symbol"] for f in result.failed] == ["AAPL"]
+    assert session.scalar(select(DailyPrice).where(DailyPrice.symbol == "AAPL")) is None
 
 
 # ----- _as_datetime helper --------------------------------------------------
