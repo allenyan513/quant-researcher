@@ -119,6 +119,11 @@ You **do not need IBKR**. Holdings come from either:
   `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` and Claude can pull a snapshot for you.
   It's pure convenience over the same importer.
 
+If your Flex query also has the **Trades** section ticked, `qr trades sync` records
+your executed fills (one idempotent row per execution). A scheduled GitHub Action
+can pull the prior session's trades each morning — see
+[`.github/workflows/data-refresh.yml`](.github/workflows/data-refresh.yml).
+
 **Mapping a broker export to the `qr` schema.** Brokers name their columns
 differently — rename them to match the template. Common mappings:
 

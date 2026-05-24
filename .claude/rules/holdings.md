@@ -29,6 +29,18 @@ automatically (the importer keeps all attrs in `raw` JSON).
 optional `avg_cost / mark_price / market_value / currency / asset_category / side /
 description`. Empty numeric cells become None.
 
+**Trades** (`fetch_trades` + `import_trades`, model `models/trades.py`)
+- Same Flex two-step; `_parse(container_tag, row_tag)` is generic — trades parse
+  `<Trades><Trade>`. The live query must have the **Trades** section ticked.
+- Grain is **per execution (fill)**, PK `(account_id, ib_exec_id)`. `ibExecID` is
+  globally unique, so `merge` makes a same-day re-pull idempotent and lets an IBKR
+  correction (same execID) overwrite in place.
+- **Empty payload is legitimate** (no-trade day) → `import_trades` returns
+  `imported=0` instead of raising (unlike `import_holdings`). `qr trades sync` then
+  exits 0. Pull "Last Business Day" after the close — intraday Flex is unreliable.
+- `executed_at` is stored **verbatim** (Flex `dateTime` format varies, no tz);
+  `trade_date` (YYYYMMDD) is parsed via `_parse_flex_date` for day-level queries.
+
 **Gotchas**:
 - An OPT position's `symbol` is OCC-style (e.g. `"META  260821P00530000"`, double
   space in the middle) — don't trim/split, store verbatim.
