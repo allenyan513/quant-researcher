@@ -1,6 +1,6 @@
 # quant-researcher — Features(需求定稿 v1.0)
 
-> 状态:**已定稿 v1.0**(§7 全部关闭,见决策记录 D1–D11) · 需求见本文 / 实现见 `docs/implementation-plan.md` · 2026-05-19
+> 状态:**已定稿 v1.0**(§7 全部关闭,见决策记录 D1–D12) · 需求见本文 / 实现见 `docs/implementation-plan.md` · 2026-05-19(D12 于 2026-05-23 追加)
 
 ## 1. 背景与目标
 
@@ -14,7 +14,7 @@
 
 1. **Claude 是编排者,本系统是底座**:对外暴露**粒度小、可组合**的操作(筛选 / 估值 / 取财报 / 算信号 / 记决策 / 跑回测),而不是一个"端到端黑箱"。Claude 负责把它们串起来。
 2. **稳定的机读契约**:每个操作返回**结构化、带 schema、带 as-of 时间戳**的结果,Claude 能可靠地链式消费(筛选 → 选标的 → 估值 → 深研 → 模拟买入 → 跟踪)。
-3. **宇宙数据仓库是脊柱**:筛选/技术扫描/估值/信号/回测全部依赖一个自有仓库;存储后端 = **Supabase Postgres**(用户自建独立项目,与 valuescope 隔离;`QR_DATABASE_URL` 仍是任意 Postgres DSN,但 v1 不文档化备选后端,见 D9/D10/D11)。接受数据管线维护成本。
+3. **宇宙数据仓库是脊柱**:筛选/技术扫描/估值/信号/回测全部依赖一个自有仓库;存储后端 = **Neon Postgres**(serverless;用户自建独立项目;`QR_DATABASE_URL` 仍是任意 Postgres DSN,但 v1 不文档化备选后端,见 D9–D12)。接受数据管线维护成本。
 4. **一切可复现、可审计**:任何筛选/估值/研报/决策/信号/回测都要落盘**输入快照 + 参数 + 代码或模型版本**。让"放手让 Claude 决策,事后复盘"这件事可信。
 5. **point-in-time 正确**:筛选与回测必须能按"某历史时点的已知信息"取数,避免前视偏差;退市标的保留(抗幸存者偏差)。
 6. **新鲜度与成本透明**:每个结果都告诉 Claude"数据多新、是否走了昂贵刷新",Claude 据此决定是否触发刷新。
@@ -122,7 +122,7 @@
 - ❌ 多用户 / 鉴权 / SaaS 化(个人优先)。
 - ❌ 本系统内做自然语言理解(那是 Claude Code 的职责)。
 - ❌ 本系统写"文章/叙述"(交给 Claude 与现有 skills)。
-- ✅ 接口形态 / DB / 语言已在 `docs/implementation-plan.md` 定案(见 D9/D10/D11 / I1–I8):CLI 优先 + Supabase Postgres + Python 3.13。
+- ✅ 接口形态 / DB / 语言已在 `docs/implementation-plan.md` 定案(见 D9–D12 / I1–I8):CLI 优先 + Neon Postgres + Python 3.13。
 
 ## 决策记录(Decisions Log)
 
@@ -139,8 +139,9 @@
 - **D9(2026-05-19)实现期决策定案 → 详见 `docs/implementation-plan.md`(I1–I8)。** 要点:接口=CLI 优先(JSON 信封契约),MCP 留后作薄适配;数据层=SQLAlchemy+Alembic、Postgres 方言、`QR_DATABASE_URL` DSN 可配置;节奏=逐域扎实按 D4 顺序;语言=Python 3.13 + uv。**修订设计原则 3**:「本地、可离线」→「自有仓库,存储后端 DSN 可配置」(默认见 D10)。
 - **D10(2026-05-19)DB 默认 → Supabase Postgres(取代 D9 早先的"默认本地 Postgres")。** 用户偏好:不在本地跑 Postgres。**实现细节**:用户自建独立 Supabase 项目(与 valuescope 隔离,符合 D1);`QR_DATABASE_URL` 仍可切本地 Postgres(docker compose)作离线/开发模式。**Free-tier 7 天暂停对策**:`qr db ping` 简单查询 + 文档化 cron 配方(如每 5 天 ping 一次),或上 Pro($25/月)消除暂停。**权衡接受**:每次 CLI 调用一次网络往返、跨机一致(笔记本/台式/cron 共享同一仓库)、零本机运维、Supabase dashboard 便于浏览数据。
 - **D11(2026-05-19)精简 DB 工具链 → 取消 Alembic 与 docker-compose,只用 Supabase。** 用户偏好:不要 DB 工具开销。**实现**:schema = SQLAlchemy 声明式 model + `qr db init`(`Base.metadata.create_all(checkfirst=True)`,幂等);**演进**:手写 SQL(Supabase dashboard)或新增 model 后重跑 `init`(仅添加表/列安全;改/删需手工 ALTER)。**Free-tier 暂停问题作废**:用户已升级 Supabase Pro。**取代**:D9 的 "SQLAlchemy+Alembic"→"SQLAlchemy + create_all";D10 的 "本地 Postgres(docker compose)可选模式"→不再文档化此模式(`QR_DATABASE_URL` 仍是任意 DSN,但不作产品形态)。
+- **D12(2026-05-23)DB 后端 Supabase → Neon。** 用户部署偏好变更:实际运行的 Postgres 从 Supabase 迁到 [Neon](https://neon.tech)(serverless Postgres)。**零代码改动**:`config.py` 的 DSN scheme normalize 早已 provider-agnostic(`postgres://` / `postgresql://` → `postgresql+psycopg://`),换 `QR_DATABASE_URL` 即可生效;schema 仍走 `Base.metadata.create_all` via `qr db init`(D11 不变)。**修订 D10/D11 中的 Supabase 细节**:① 默认后端 = Neon;② schema 演进的"手工 ALTER"改在 Neon console 的 SQL Editor 做(非 Supabase dashboard);③ **free-tier 暂停对策简化** —— Neon 是 scale-to-zero(空闲后计算休眠、首个查询秒级自动唤醒),不像 Supabase free-tier 7 天整体暂停,故 D10 的"cron 定期 ping 保活"配方不再必要(`qr db ping` 仍可用作连通/延迟检查)。**保留**:D11 的"无 Alembic / 无 docker-compose";`QR_DATABASE_URL` 仍是任意 Postgres DSN(Supabase / 本地 Postgres 仍可切,只是不再作默认形态)。
 
-## 7. 开放讨论项(全部已关闭 → 见上方决策记录 D1–D11)
+## 7. 开放讨论项(全部已关闭 → 见上方决策记录 D1–D12)
 
 1. ✅ **已决定(D1)** — 与 valuescope 的关系:干净重写、独立、不依赖。详见决策记录 D1。
 2. ✅ **已决定(D5)** — 复用 quant-engine 引擎与指标,移植入本仓库,不作硬依赖。详见决策记录 D5。
@@ -152,4 +153,4 @@
 
 ## 8. 下一步
 
-本稿已**定稿 v1.0**(§7 全部关闭,见决策记录 D1–D11)。实现规划已完成 → `docs/implementation-plan.md`(I1–I8、里程碑 M0→MH)。**M0 脚手架已完成**(2026-05-19);下一步 MA 需用户提供 ~200-300 ticker 关注池。
+本稿已**定稿 v1.0**(§7 全部关闭,见决策记录 D1–D12)。实现规划已完成 → `docs/implementation-plan.md`(I1–I8、里程碑 M0→MH)。**v1 八能力域(M0 + MA–MH)已全部落地**(2026-05-23);后续候选(EPV/DDM、反向 DCF、多标的回测、MCP 适配层)见 implementation-plan §7 末尾。

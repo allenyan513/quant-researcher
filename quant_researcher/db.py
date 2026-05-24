@@ -1,8 +1,8 @@
 """Database engine + session factory + declarative Base.
 
-Per I2 / D9 / D10: SQLAlchemy 2.x + Alembic, Postgres dialect, DSN from
-`QR_DATABASE_URL` (default = Supabase). Models (added from MA onward) inherit
-from `Base`.
+Per I2 / D9–D12: SQLAlchemy 2.x (no Alembic — D11), Postgres dialect, DSN
+from `QR_DATABASE_URL` (default = Neon; any managed Postgres works). Models
+(added from MA onward) inherit from `Base`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def engine() -> Engine:
     """Cached SQLAlchemy engine bound to QR_DATABASE_URL.
 
     `pool_pre_ping=True` defends against stale connections (relevant for
-    Supabase / managed Postgres which may drop idle connections).
+    Neon / managed Postgres which may drop idle connections).
     """
     return create_engine(
         settings().qr_database_url,

@@ -28,9 +28,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Required: Postgres DSN. Per D10/D11 this is Supabase or any other managed
-    # Postgres (Neon, etc.). The scheme is auto-normalized below — paste whatever
-    # the provider gives you (`postgres://...` or `postgresql://...`).
+    # Required: Postgres DSN. Per D10–D12 this is Neon or any other managed
+    # Postgres (Supabase, etc.). The scheme is auto-normalized below — paste
+    # whatever the provider gives you (`postgres://...` or `postgresql://...`).
     qr_database_url: str
 
     # Required at MA (data warehouse ingestion)
