@@ -1,10 +1,12 @@
 """Refresh pipelines for FMP-sourced warehouse tables.
 
 `refresh_profile` overwrites `profiles` rows per symbol (FMP is the truth).
-`refresh_quotes` is append-only on `daily_prices`: it asks for OHLCV since
-the latest known trade_date (or `today − lookback_days` if the symbol is new)
-and inserts only dates not yet in the table — EOD bars are treated as
-immutable in v1.
+`refresh_quotes` is mostly append-only on `daily_prices`: it asks for OHLCV
+since the latest known trade_date (or `today − lookback_days` if the symbol is
+new) and inserts dates not yet in the table. The exception is a trailing
+`heal_window_days` of recent bars, which are re-fetched and UPSERTed every run
+so a preliminary close/volume/adj_close captured near the US close gets
+corrected once FMP finalizes it. Older EOD bars stay immutable (insert-only).
 
 Per-symbol failures are isolated: one bad ticker yields a `SymbolOutcome`
 with `ok=False` and the loop continues. The caller decides what to do with
@@ -17,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from quant_researcher.data.fmp import FMPClient, FMPError
@@ -122,9 +124,10 @@ def refresh_quotes(
     symbols: list[str],
     *,
     lookback_days: int = 730,
+    heal_window_days: int = 7,
     only_stale: bool = True,
 ) -> RefreshResult:
-    """Append-only refresh of `daily_prices` per symbol.
+    """Mostly-append refresh of `daily_prices` per symbol, with recent-bar heal.
 
     Fetches raw OHLCV from `/historical-price-eod/full` AND the split/dividend-
     adjusted stream from `/historical-price-eod/dividend-adjusted`, joining each
@@ -136,15 +139,23 @@ def refresh_quotes(
     ingest with `adj_close=None` (panel fallback) rather than a plan gate halting
     ALL quote ingestion.
 
-    Ingest is append-only (dedup on existing `trade_date`): this only sets
-    `adj_close` on NEW bars and never revises existing rows. Two consequences:
-    (1) a split/dividend re-scales FMP's WHOLE adjusted series, but old rows keep
-    their prior `adj_close` → they go STALE; (2) if `/full` publishes a bar
-    before `/dividend-adjusted` does, that bar is stored with `adj_close=None`
-    and never corrected. `--force` repairs neither (it re-fetches only the
-    incremental window; dedup skips stored dates). To repair existing rows,
-    re-run `scripts/backfill_adj_close.py` (idempotent, updates in place) — e.g.
-    after a corporate action.
+    Ingest is append-only EXCEPT for a trailing `heal_window_days` of recent
+    bars. The incremental fetch starts at `latest − heal_window_days` (not
+    `latest + 1`), so the last few stored bars are re-pulled and UPSERTed: a bar
+    stored with a PRELIMINARY close/volume/adj_close near the US close (e.g. the
+    23:00-UTC CI run, which can capture an intraday value FMP later revises)
+    gets corrected once finalized. Bars OLDER than the window are insert-only —
+    a filed EOD bar is immutable, so the duplicate date is skipped. The initial
+    bulk load (no prior data) is pure insert. See `_upsert_prices`.
+
+    Two staleness caveats the heal window does NOT fully fix:
+    (1) a split/dividend re-scales FMP's WHOLE adjusted series — bars OLDER than
+    the window keep their prior `adj_close` and go stale; re-run
+    `scripts/backfill_adj_close.py` (idempotent) after a corporate action.
+    (2) under the default `only_stale=True`, a symbol whose latest bar is within
+    the `quote` freshness threshold (3 calendar days) is filtered out before any
+    fetch, so a preliminary bar heals only on the next run that re-fetches it
+    (within ~3 days, or immediately under `--force`).
 
     `only_stale=True` (default since MA-4) narrows `symbols` via
     `stale_symbols("quote", ...)` before any FMP call.
@@ -154,25 +165,28 @@ def refresh_quotes(
     outcomes: list[SymbolOutcome] = []
     today = date.today()
     for sym in symbols:
+        # latest-lookup + window math don't raise FMPError → keep them out of
+        # the try (§2: try wraps only the calls that can fail per-symbol).
+        latest = session.scalar(
+            select(DailyPrice.trade_date)
+            .where(DailyPrice.symbol == sym)
+            .order_by(DailyPrice.trade_date.desc())
+            .limit(1)
+        )
+        heal_floor: date | None = None
+        if latest is not None:
+            heal_floor = latest - timedelta(days=heal_window_days)
+            since = heal_floor
+        else:
+            since = today - timedelta(days=lookback_days)
         try:
-            latest = session.scalar(
-                select(DailyPrice.trade_date)
-                .where(DailyPrice.symbol == sym)
-                .order_by(DailyPrice.trade_date.desc())
-                .limit(1)
-            )
-            since = (
-                latest + timedelta(days=1)
-                if latest
-                else today - timedelta(days=lookback_days)
-            )
             rows = client.get_historical_prices(sym, since=since)
             adj_rows = client.get_adjusted_prices(sym, since=since)
         except FMPError as exc:
             outcomes.append(SymbolOutcome(sym, ok=False, error=str(exc)))
             continue
         outcomes.append(
-            _insert_prices(session, sym, rows, _adj_close_by_date(adj_rows))
+            _upsert_prices(session, sym, rows, _adj_close_by_date(adj_rows), heal_floor)
         )
     return RefreshResult(scope="quote", outcomes=outcomes)
 
@@ -192,12 +206,26 @@ def _adj_close_by_date(rows: list[dict[str, Any]]) -> dict[date, float]:
     return out
 
 
-def _insert_prices(
+def _upsert_prices(
     session: Session,
     symbol: str,
     rows: list[dict[str, Any]],
     adj_by_date: dict[date, float],
+    heal_floor: date | None,
 ) -> SymbolOutcome:
+    """Insert new bars; heal (UPSERT) existing bars on/after `heal_floor`.
+
+    A `trade_date` not yet stored is inserted. An EXISTING bar is overwritten
+    only when it falls in the heal window (`trade_date >= heal_floor`) — this
+    corrects a preliminary close/volume/adj_close once FMP finalizes it. Existing
+    bars older than `heal_floor` (and every existing bar when `heal_floor is
+    None`, i.e. the initial bulk load) are insert-only: a filed EOD bar is
+    immutable, so the duplicate date is skipped. `adj_close` is carried through
+    both paths (from `/full`, else the dividend-adjusted join); on heal a None
+    incoming `adj_close` falls back to the stored value so a lagging adjusted
+    stream never regresses a good `adj_close` to None. `known_at` is left at the
+    original ingestion timestamp.
+    """
     parsed: list[dict[str, Any]] = []
     for r in rows:
         mapped = _price_from_fmp(symbol, r)
@@ -212,19 +240,35 @@ def _insert_prices(
         return SymbolOutcome(symbol, ok=True, upserted=0)
 
     incoming_dates = {p["trade_date"] for p in parsed}
-    existing = set(
-        session.scalars(
-            select(DailyPrice.trade_date).where(
+    existing_adj: dict[date, float | None] = {
+        d: a
+        for d, a in session.execute(
+            select(DailyPrice.trade_date, DailyPrice.adj_close).where(
                 DailyPrice.symbol == symbol,
                 DailyPrice.trade_date.in_(incoming_dates),
             )
         )
-    )
-    new_rows = [p for p in parsed if p["trade_date"] not in existing]
+    }
+    new_rows: list[dict[str, Any]] = []
+    heal_rows: list[dict[str, Any]] = []
+    skipped = 0
+    for p in parsed:
+        if p["trade_date"] not in existing_adj:
+            new_rows.append(p)
+        elif heal_floor is not None and p["trade_date"] >= heal_floor:
+            if p["adj_close"] is None:
+                p["adj_close"] = existing_adj[p["trade_date"]]
+            heal_rows.append(p)
+        else:
+            skipped += 1
     if new_rows:
         session.execute(insert(DailyPrice), new_rows)
+    if heal_rows:
+        # Bulk UPDATE by PK (symbol, trade_date): SET OHLCV/adj_close/volume,
+        # leave `known_at` untouched.
+        session.execute(update(DailyPrice), heal_rows)
     return SymbolOutcome(
-        symbol, ok=True, upserted=len(new_rows), skipped=len(parsed) - len(new_rows)
+        symbol, ok=True, upserted=len(new_rows) + len(heal_rows), skipped=skipped
     )
 
 
