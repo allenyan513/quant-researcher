@@ -9,8 +9,7 @@
 >   edit that domain (editing `quant_researcher/valuation/**` pulls in `valuation.md`,
 >   etc.) — you don't need to read them all up front.
 >
-> User-facing pitch: [`README.md`](README.md). Requirements + decision log (D1–D12)
-> and implementation notes (I1–I8): [`docs/`](docs/). Code status: **v1 — all eight
+> User-facing pitch: [`README.md`](README.md). Code status: **v1 — all eight
 > capability domains (M0 + MA–MH) closed.**
 
 ## §0 — Operating this tool (you are the agent a human drives)
@@ -144,8 +143,6 @@ def data_refresh(...) -> None:
   when you edit the matching code: `data` · `models` · `screen` · `valuation` ·
   `holdings` · `research` · `ledger` · `backtest`(+`engine`) · `signals` · `testing`.
   Editing a file under `quant_researcher/<domain>/` auto-loads its rule.
-- **Design first** → record decisions in `docs/features.md` (new `D`) and
-  `docs/implementation-plan.md` before writing code; don't sneak decisions into code.
 - **Key entry points** (read the tree for the rest): `cli.py` (all subcommands;
   lazy-import; `_emit` outside try), `contract.py` (Envelope + `SCHEMA_VERSION`),
   `db.py` (Base + bottom-of-file model side-effect import), `config.py` (DSN normalize).

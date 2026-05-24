@@ -128,8 +128,7 @@ As a human *using* the tool, you rarely need to open it.
 
 ## Status
 
-**v1 — all eight capability domains are closed.** Design rationale lives in
-[`docs/`](docs/) (the decision log D1–D12 and implementation notes I1–I8).
+**v1 — all eight capability domains are closed.**
 
 ## License
 
