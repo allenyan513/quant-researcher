@@ -196,9 +196,11 @@ def test_refresh_quotes_initial_fetch_uses_lookback_window(
     assert rows[0].volume == 100
 
 
-def test_refresh_quotes_incremental_uses_latest_plus_one(
+def test_refresh_quotes_incremental_refetches_heal_window(
     session: Session, fmp: MagicMock
 ) -> None:
+    # Incremental fetch starts heal_window_days BEFORE the latest stored bar
+    # (not latest+1) so the recent tail can be re-pulled and corrected.
     session.execute(
         insert(DailyPrice),
         [{"symbol": "AAPL", "trade_date": date(2024, 6, 1), "close": 1.0}],
@@ -208,28 +210,130 @@ def test_refresh_quotes_incremental_uses_latest_plus_one(
     fmp.get_historical_prices.return_value = [
         {"date": "2024-06-02", "close": 1.1, "volume": 100},
     ]
-    refresh_quotes(session, fmp, ["AAPL"])
+    refresh_quotes(session, fmp, ["AAPL"], heal_window_days=5, only_stale=False)
 
-    assert fmp.get_historical_prices.call_args.kwargs["since"] == date(2024, 6, 2)
+    window_start = date(2024, 6, 1) - timedelta(days=5)
+    assert fmp.get_historical_prices.call_args.kwargs["since"] == window_start
+    # Adjusted stream re-fetched over the same window so heals carry adj_close.
+    assert fmp.get_adjusted_prices.call_args.kwargs["since"] == window_start
 
 
-def test_refresh_quotes_dedupes(session: Session, fmp: MagicMock) -> None:
+def test_refresh_quotes_heals_preliminary_recent_bar(
+    session: Session, fmp: MagicMock
+) -> None:
+    # A recent bar stored with a PRELIMINARY close/volume/adj_close (captured
+    # near the US close) is re-fetched and overwritten in place once FMP
+    # finalizes it — no duplicate row. Mirrors the real AAPL 2026-05-21 case.
+    session.execute(
+        insert(DailyPrice),
+        [
+            {
+                "symbol": "AAPL",
+                "trade_date": date(2024, 1, 10),
+                "open": 300.0,
+                "high": 305.0,
+                "low": 299.0,
+                "close": 302.25,
+                "adj_close": 301.0,
+                "volume": 7_412_155,
+            }
+        ],
+    )
+    session.commit()
+
+    # /full now returns the finalized 2024-01-10 bar plus a brand-new 2024-01-11.
     fmp.get_historical_prices.return_value = [
-        {"date": "2024-01-02", "close": 1.5, "volume": 100},
+        {
+            "date": "2024-01-10",
+            "open": 300.0,
+            "high": 306.0,
+            "low": 299.0,
+            "close": 304.99,
+            "volume": 42_965_126,
+        },
+        {"date": "2024-01-11", "close": 306.0, "volume": 1_000},
     ]
-    refresh_quotes(session, fmp, ["AAPL"])
+    fmp.get_adjusted_prices.return_value = [
+        {"date": "2024-01-10", "adjClose": 303.5},
+        {"date": "2024-01-11", "adjClose": 306.0},
+    ]
+    result = refresh_quotes(session, fmp, ["AAPL"], heal_window_days=7, only_stale=False)
+    session.commit()
+
+    rows = sorted(
+        session.scalars(select(DailyPrice).where(DailyPrice.symbol == "AAPL")),
+        key=lambda r: r.trade_date,
+    )
+    assert len(rows) == 2  # healed in place, not duplicated
+    healed, inserted = rows
+    assert healed.trade_date == date(2024, 1, 10)
+    assert healed.close == 304.99  # corrected from preliminary 302.25
+    assert healed.volume == 42_965_126  # corrected from 7_412_155
+    assert healed.adj_close == 303.5  # adj_close carried through the heal
+    assert inserted.trade_date == date(2024, 1, 11)
+    assert inserted.close == 306.0
+    assert result.total_upserted == 2  # 1 heal + 1 insert
+    assert result.total_skipped == 0
+
+
+def test_refresh_quotes_old_bar_stays_insert_only(
+    session: Session, fmp: MagicMock
+) -> None:
+    # An existing bar OLDER than the heal window is immutable: even if FMP
+    # returns a different value for that date, it's skipped (not overwritten).
+    # latest=2024-02-01, heal_window_days=7 → heal_floor=2024-01-25, so the
+    # 2024-01-02 bar is outside the window.
+    session.execute(
+        insert(DailyPrice),
+        [
+            {"symbol": "AAPL", "trade_date": date(2024, 1, 2), "close": 1.0, "volume": 5},
+            {"symbol": "AAPL", "trade_date": date(2024, 2, 1), "close": 2.0, "volume": 9},
+        ],
+    )
     session.commit()
 
     fmp.get_historical_prices.return_value = [
-        {"date": "2024-01-02", "close": 1.5, "volume": 100},
+        {"date": "2024-01-02", "close": 999.0, "volume": 123},  # old date, changed
     ]
-    result = refresh_quotes(session, fmp, ["AAPL"])
+    result = refresh_quotes(session, fmp, ["AAPL"], heal_window_days=7, only_stale=False)
     session.commit()
 
+    old = session.get(DailyPrice, ("AAPL", date(2024, 1, 2)))
+    assert old.close == 1.0  # NOT overwritten — insert-only for old bars
+    assert old.volume == 5
     assert result.total_upserted == 0
     assert result.total_skipped == 1
-    rows = list(session.scalars(select(DailyPrice).where(DailyPrice.symbol == "AAPL")))
-    assert len(rows) == 1
+
+
+def test_refresh_quotes_heal_keeps_stored_adj_close_when_adjusted_lags(
+    session: Session, fmp: MagicMock
+) -> None:
+    # On a heal, if the dividend-adjusted stream doesn't return the bar's date
+    # (it can lag /full), the stored adj_close is kept rather than nulled.
+    session.execute(
+        insert(DailyPrice),
+        [
+            {
+                "symbol": "AAPL",
+                "trade_date": date(2024, 1, 10),
+                "close": 302.25,
+                "adj_close": 301.0,
+                "volume": 100,
+            }
+        ],
+    )
+    session.commit()
+
+    fmp.get_historical_prices.return_value = [
+        {"date": "2024-01-10", "close": 304.99, "volume": 200},  # /full only
+    ]
+    fmp.get_adjusted_prices.return_value = []  # adjusted stream lagging
+    refresh_quotes(session, fmp, ["AAPL"], heal_window_days=7, only_stale=False)
+    session.commit()
+
+    row = session.get(DailyPrice, ("AAPL", date(2024, 1, 10)))
+    assert row.close == 304.99  # close still healed
+    assert row.adj_close == 301.0  # prior adj_close preserved, not nulled
 
 
 def test_refresh_quotes_empty_response(session: Session, fmp: MagicMock) -> None:
