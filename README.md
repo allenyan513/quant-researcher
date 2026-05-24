@@ -114,7 +114,7 @@ You **do not need IBKR**. Holdings come from either:
   Vanguard — anything — map them to the small `qr` schema, and Claude imports them.
   Start from [`config/holdings.sample.csv`](config/holdings.sample.csv) (required
   columns `account_id, symbol, quantity, as_of_date`; optional `avg_cost,
-  mark_price, market_value, currency, asset_category, side, description`).
+  mark_price, market_value, currency, asset_category, sub_category, side, description`).
 - **IBKR Flex (optional automation).** If you *do* use Interactive Brokers, set
   `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` and Claude can pull a snapshot for you.
   It's pure convenience over the same importer.

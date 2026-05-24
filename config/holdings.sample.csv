@@ -1,5 +1,5 @@
-account_id,symbol,quantity,as_of_date,avg_cost,mark_price,currency,asset_category,side,description
-U1234567,AAPL,100,2026-05-24,180.50,195.20,USD,STK,Long,Apple Inc
-U1234567,MSFT,50,2026-05-24,380.00,410.15,USD,STK,Long,Microsoft Corp
-U1234567,NVDA,30,2026-05-24,850.00,920.40,USD,STK,Long,NVIDIA Corp
-U1234567,SPY,40,2026-05-24,510.00,535.40,USD,ETF,Long,SPDR S&P 500 ETF Trust
+account_id,symbol,quantity,as_of_date,avg_cost,mark_price,currency,asset_category,sub_category,side,description
+U1234567,AAPL,100,2026-05-24,180.50,195.20,USD,STK,,Long,Apple Inc
+U1234567,MSFT,50,2026-05-24,380.00,410.15,USD,STK,,Long,Microsoft Corp
+U1234567,NVDA,30,2026-05-24,850.00,920.40,USD,STK,,Long,NVIDIA Corp
+U1234567,SPY,40,2026-05-24,510.00,535.40,USD,ETF,,Long,SPDR S&P 500 ETF Trust
