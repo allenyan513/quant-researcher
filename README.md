@@ -1,192 +1,135 @@
 # quant-researcher
 
-> A point-in-time US-equity research warehouse and analysis toolkit that an LLM
-> agent (Claude Code) drives over a stable **JSON-on-stdout CLI contract**. It
-> does the unglamorous part — fetch, compute, persist, reproduce — so the agent
-> can focus on judgment and narrative.
+> An LLM-orchestrated US-equity research substrate. You talk to **Claude Code**
+> in plain English — *"deep-dive NVDA", "how's my portfolio doing", "find cheap
+> quality compounders"* — and it drives the data warehouse, screens, valuation,
+> backtests, and decision ledger underneath, then writes the answer. **You never
+> touch a command line.**
 
 [![CI](https://github.com/allenyan513/quant-researcher/actions/workflows/ci.yml/badge.svg)](https://github.com/allenyan513/quant-researcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
 
-## Why this exists
+## How you use it
 
-LLM agents reason well but can't reliably *get* clean, point-in-time financial
-data — or remember what they decided and how it turned out. quant-researcher is
-the substrate underneath the agent:
+You don't run `qr` commands by hand. You set it up once (below), then talk to
+**Claude Code** — the terminal AI agent — in natural language. Claude reads
+[`CLAUDE.md`](CLAUDE.md), decomposes your request into the right `qr` calls,
+chains them, and synthesizes the answer.
 
-- **Agent-first contract, not a black box.** Every `qr` subcommand prints
-  **exactly one JSON envelope** on stdout. Claude chains them — screen → value →
-  research bundle → record decision → track alpha — and writes the prose itself.
-  The system never does NLP or narrative; that's the agent's job.
+| You ask Claude… | …and it orchestrates under the hood |
+|---|---|
+| *"Screen for cheap quality compounders, then value the top 3."* | fundamental screen → DCF / PEG / multiples on the best names |
+| *"Deep-dive NVDA before I add to my position."* | research bundle → earnings actual-vs-estimate → valuation |
+| *"What moved in my portfolio overnight, and why?"* | morning call — per-holding view + portfolio aggregates |
+| *"Did my January buys actually beat the market?"* | forward-alpha tracking vs SPY / sector → scorecard |
+| *"Is a 20/50 SMA crossover any good on AAPL the last two years?"* | backtest → metrics + equity curve |
+| *"Has momentum predicted returns across my universe?"* | factor IC / quantile spread / decay |
+
+The system never interprets your intent or writes prose — that's Claude's job. It
+only does **fetch → compute → persist → reproduce**, behind a stable
+JSON-on-stdout contract an agent can chain reliably.
+
+## Why it's built this way
+
+The properties that make it safe to hand an agent your research:
+
 - **Point-in-time correct.** Financial statements are stamped with FMP's
   `acceptedDate`, so screens and backtests see only what was knowable on the
   as-of date. No lookahead bias.
 - **Reproducible and auditable.** Every result carries `as_of`, `code_version`,
   and an optional snapshot id. A decision snapshots the exact data it was made
   on — so you can grade the agent's judgment months later.
+- **Agent-first contract, not a black box.** One JSON envelope per command; the
+  agent composes small primitives instead of calling one end-to-end oracle, so
+  you can see and trust every step.
 - **Yours, low-config.** Built around a personal IBKR + CSV + Claude-skills
   workflow. Opinionated defaults over endless configuration.
 
-## What it does — eight capability domains
+## What your agent can do — eight capability domains
 
-| | Domain | Highlights |
+| | Domain | What Claude can do for you |
 |---|---|---|
-| **A** | Data warehouse | FMP ingest, layered refresh, freshness-aware (only refreshes stale rows) |
-| **B** | Screening | fundamental AST expressions **and** a technical-predicate DSL; saved, runnable, diffable |
-| **C** | Valuation | DCF-FCFF + PEG + relative multiples, 5×5 sensitivity grid, reproducible snapshots |
+| **A** | Data warehouse | keep a point-in-time FMP-fed warehouse fresh, refreshing only what's stale |
+| **B** | Screening | fundamental expressions **and** technical scans, combined, saved, and diffed over time |
+| **C** | Valuation | DCF-FCFF + PEG + relative multiples with a sensitivity grid, every run snapshotted |
 | **D** | Research & earnings | one-shot research bundle; earnings actual-vs-estimate with surprise |
-| **E** | Holdings & morning call | IBKR Flex **or any-broker CSV**; lean portfolio briefing |
-| **F** | Decision ledger | record thesis + data snapshot, track 1w–6m alpha vs SPY / sector ETF |
+| **E** | Holdings & morning call | positions from IBKR **or any-broker CSV**; a lean portfolio briefing |
+| **F** | Decision ledger | record a thesis + data snapshot, then track 1w–6m alpha vs SPY / sector |
 | **G** | Signal research | factor IC / quantile spread / decay, strictly point-in-time |
-| **H** | Backtesting | ported event-driven engine, 6 built-in strategies + external strategy files |
+| **H** | Backtesting | an event-driven engine, 6 built-in strategies + your own strategy files |
 
-A single chain looks like this — and Claude orchestrates it from one natural-language ask:
+## One-time setup
 
-```bash
-qr screen run --expr "pe < 25 and fcf_yield > 0.05 and roic > 0.12"   # find candidates
-qr value AAPL --model all                                              # fair value + upside
-qr research bundle AAPL                                                # one JSON with everything
-qr ledger add AAPL --side buy --thesis "cheap compounder" --confidence 4
-qr ledger track                                                        # later: did it beat SPY?
-```
+You (the human) do this once. After that, it's all natural language.
 
-## Quick start
-
-**Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/), a Postgres
-DSN ([Neon](https://neon.tech) recommended — serverless, scale-to-zero; any
-Postgres works), and an [FMP](https://financialmodelingprep.com) API key
-(see [Data](#data-you-bring-an-fmp-key) below).
+**Prerequisites:** Python 3.13+, [uv](https://docs.astral.sh/uv/), a Postgres DSN
+([Neon](https://neon.tech) recommended — serverless, scale-to-zero; any Postgres
+works), and an [FMP](https://financialmodelingprep.com) API key (see
+[Data](#data-you-bring-an-fmp-key)).
 
 ```bash
 git clone git@github.com:allenyan513/quant-researcher.git
 cd quant-researcher
 uv sync
 
-cp .env.example .env          # fill in QR_DATABASE_URL + FMP_API_KEY
+cp .env.example .env            # fill in QR_DATABASE_URL + FMP_API_KEY
 $EDITOR .env
 
-uv run qr db ping             # verify the connection
-uv run qr db init             # create the schema
+uv run qr db ping               # verify the connection
+uv run qr db init               # create the schema
 
 cp config/watchlist.sample.txt config/watchlist.txt   # your tickers, one per line
 uv run qr universe set --file config/watchlist.txt
-
-uv run qr data refresh --scope all    # first run: ingest everything
-uv run qr data freshness              # see what's fresh / stale / missing
+uv run qr data refresh --scope all                    # first ingest
 ```
 
-`qr data refresh` only re-fetches **stale or missing** rows by default (per-scope
-thresholds); add `--force` to refresh everything. If your FMP plan excludes
-quarterly statements, add `--periods annual`.
+Then open Claude Code in this repo and just talk to it. Claude refreshes stale
+data itself when needed — you don't manage that.
 
 ## Data: you bring an FMP key
 
 The warehouse is fed by [Financial Modeling Prep](https://financialmodelingprep.com).
 You supply your own key — the project ships no data and proxies nothing. It is
-designed to **degrade gracefully** when your plan lacks a premium endpoint:
+designed to **degrade gracefully** when your plan lacks a premium endpoint, so
+Claude can keep working:
 
 | Data | If your FMP plan lacks it |
 |---|---|
 | Profiles · daily OHLCV · statements · ratios · estimates | Core warehouse — required for screening / valuation / backtests |
-| News (`qr research news`) | **Soft-fails** → bundles still build, just without headlines |
-| Earnings transcript (`qr earnings --transcript`) | **Soft-fails** → returns without the excerpt |
+| News | **Soft-fails** → research bundles still build, just without headlines |
+| Earnings transcript | **Soft-fails** → returns without the excerpt |
 | Dividend-adjusted close | **Soft-fails** → falls back to raw close |
 | key-metrics (ROE / ROA / FCF-yield) | Per-field hard-fail on that period; `/ratios` rows still ingest |
 
 The core warehouse runs on FMP's entry tiers (rate-limited); premium-only
-endpoints fail soft so the rest of the pipeline keeps working. A small sample
-dataset for trying the tool **without** a paid key is on the roadmap.
+endpoints fail soft so the rest keeps working. A small sample dataset for trying
+the tool **without** a paid key is on the roadmap.
 
 ## Holdings: any broker
 
-Holdings come from one of two sources — **you do not need IBKR**:
+You **do not need IBKR**. Holdings come from either:
 
 - **CSV (any broker).** Export positions from Schwab, Fidelity, Robinhood,
-  Vanguard, anything — map them to a tiny schema and import. Required columns:
-  `account_id, symbol, quantity, as_of_date`; optional `avg_cost, mark_price,
-  market_value, currency, asset_category, side, description`.
-
-  ```bash
-  uv run qr holdings import-csv --file my_positions.csv
-  ```
-
+  Vanguard — anything — and Claude imports them (required columns: `account_id,
+  symbol, quantity, as_of_date`; common optionals like `avg_cost`, `mark_price`
+  supported).
 - **IBKR Flex (optional automation).** If you *do* use Interactive Brokers, set
-  `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` and `qr holdings sync` pulls a snapshot
-  for you. It's pure convenience layered on top of the same importer.
+  `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` and Claude can pull a snapshot for you.
+  It's pure convenience over the same importer.
 
-Each snapshot is keyed by `(account, symbol, as_of_date)`, so daily snapshots
-accumulate into a position history.
+## For the agent (and contributors)
 
-## The JSON envelope
-
-Every command emits one envelope on stdout (`exit 0` = ok, `1` = error):
-
-```json
-{
-  "ok": true,
-  "schema_version": "1",
-  "as_of": "2026-05-23",
-  "data_freshness": {"warehouse": "live"},
-  "snapshot_id": null,
-  "code_version": "git:e61f8b1",
-  "data": { "...": "command result" },
-  "error": null
-}
-```
-
-This is the whole integration surface: an agent (or any script) runs `qr ...` via
-a shell and consumes structured, timestamped, reproducible results.
-
-## Command reference
-
-| Command | What it does |
-|---|---|
-| `qr db ping / init / status` | connectivity + latency · create schema · show tables |
-| `qr universe set --file PATH` / `list` | replace the watchlist universe |
-| `qr data refresh --scope <X> [--force] [--symbols A,B]` | ingest/refresh `X ∈ {profile, quote, financials, ratios, estimates, all}` |
-| `qr data freshness` | per-scope fresh / stale / missing report |
-| `qr screen run [--expr "..."] [--technical "..."] [--name N]` | fundamental + technical screen |
-| `qr screen list / runs / diff / fields` | saved screens · run history · diff two runs · valid fields |
-| `qr value SYM [--model dcf\|peg\|multiples\|all] [--assumptions JSON]` | valuation + sensitivity, snapshotted |
-| `qr holdings sync / import-csv / list / history` | IBKR Flex or CSV positions |
-| `qr morningcall [--account A] [--as-of ...] [--save]` | per-holding + portfolio briefing |
-| `qr research bundle SYM` / `news` / `list` / `show` | one-shot research aggregate |
-| `qr earnings SYM [--limit N] [--transcript]` | actual-vs-estimate + recorded thesis |
-| `qr ledger add SYM --side buy\|sell [...]` / `track` / `scorecard` / `list` / `show` | decision journal + forward alpha |
-| `qr signal research --factor F [...]` / `factors` / `list` / `runs` / `show` | factor IC / quantiles / decay |
-| `qr backtest run --symbols A --start D --end D (--strategy N\|--strategy-file P)` / `list` / `show` | backtest + persisted metrics |
+[`CLAUDE.md`](CLAUDE.md) is the agent's manual: the full command surface, the
+JSON envelope contract, and the **"natural language → `qr` orchestration"** guide
+Claude follows. It doubles as the engineering handbook if you're modifying
+quant-researcher itself (`uv run ruff check . && uv run pytest -q` before any PR).
+As a human *using* the tool, you rarely need to open it.
 
 ## Status
 
-**v1 — all eight capability domains are closed.** Built-in backtest strategies:
-`sma_crossover`, `buy_and_hold`, `macd_crossover`, `bollinger_reversion`,
-`rsi_reversion`, `donchian_breakout`.
-
-Beyond v1 (candidates): EPV / DDM valuation models, reverse DCF, a sample
-dataset for keyless trials, multi-broker CSV templates, multi-symbol backtests,
-and an optional MCP adapter over the same core library.
-
-## Development
-
-```bash
-uv sync
-uv run ruff check .        # lint (CI-enforced)
-uv run pytest -q           # tests: in-memory SQLite + respx, no real FMP/DB needed
-```
-
-CI runs ruff + pytest on every push / PR. Schema changes use SQLAlchemy
-declarative models picked up by `qr db init` (additive); see
-[CLAUDE.md](CLAUDE.md) for the column-migration workflow.
-
-## Design docs
-
-- [CLAUDE.md](CLAUDE.md) — engineering handbook and contracts for contributors
-  (and AI collaborators).
-- [docs/features.md](docs/features.md) — requirements and the decision log
-  (D1–D12).
-- [docs/implementation-plan.md](docs/implementation-plan.md) — implementation
-  notes (I1–I8) and milestones.
+**v1 — all eight capability domains are closed.** Design rationale lives in
+[`docs/`](docs/) (the decision log D1–D12 and implementation notes I1–I8).
 
 ## License
 

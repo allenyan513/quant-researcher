@@ -1,8 +1,70 @@
 # CLAUDE.md
 
-> Engineering handbook for Claude Code (or any Claude-style AI collaborator).
-> **Read this before touching the code.** The user-facing quick start is in
-> [`README.md`](README.md); design decisions live in [`docs/`](docs/).
+> Manual for Claude Code working with quant-researcher. You're in one of two roles:
+>
+> - **Operating the tool** — a human asked you to do research ("deep-dive NVDA",
+>   "how's my portfolio"). Read **§0 — Operating this tool** first; it's your
+>   command surface + orchestration guide.
+> - **Modifying this codebase** — changing quant-researcher itself. The contracts
+>   in §1–§16 keep you from breaking it. The user-facing pitch is in
+>   [`README.md`](README.md); design rationale in [`docs/`](docs/).
+
+## §0 — Operating this tool (you are the agent a human drives)
+
+A human talks to you in plain English — *"research NVDA", "how's my portfolio",
+"find cheap compounders"*. Your job: decompose that into `qr` calls, chain them,
+and **synthesize the answer yourself**. The human never sees the commands — they
+read your prose.
+
+**The contract.** Every `qr` subcommand prints **exactly one JSON envelope** on
+stdout — `{ok, data, as_of, data_freshness, code_version, error}` — exit 0 = ok,
+1 = error. Parse it, check `ok`, read `data`, chain the next call.
+
+**Command surface** (`qr <group> <cmd>`; run `qr ... --help` for full flags):
+
+| Command | What it does |
+|---|---|
+| `qr db ping / init / status` | connectivity + latency · create schema · show tables |
+| `qr universe set --file PATH` / `list` | replace the watchlist universe |
+| `qr data refresh --scope <X> [--force] [--symbols A,B]` | ingest/refresh `X ∈ {profile, quote, financials, ratios, estimates, all}` |
+| `qr data freshness` | per-scope fresh / stale / missing report |
+| `qr screen run [--expr "..."] [--technical "..."] [--name N]` | fundamental + technical screen |
+| `qr screen list / runs / diff / fields` | saved screens · run history · diff two runs · valid fields |
+| `qr value SYM [--model dcf\|peg\|multiples\|all] [--assumptions JSON]` | valuation + sensitivity, snapshotted |
+| `qr holdings sync / import-csv / list / history` | IBKR Flex or CSV positions |
+| `qr morningcall [--account A] [--as-of ...] [--save]` | per-holding + portfolio briefing |
+| `qr research bundle SYM` / `news` / `list` / `show` | one-shot research aggregate |
+| `qr earnings SYM [--limit N] [--transcript]` | actual-vs-estimate + recorded thesis |
+| `qr ledger add SYM --side buy\|sell [...]` / `track` / `scorecard` / `list` / `show` | decision journal + forward alpha |
+| `qr signal research --factor F [...]` / `factors` / `list` / `runs` / `show` | factor IC / quantiles / decay |
+| `qr backtest run --symbols A --start D --end D (--strategy N\|--strategy-file P)` / `list` / `show` | backtest + persisted metrics |
+
+**Natural language → orchestration** (worked patterns; adapt, don't follow blindly):
+
+| The human asks… | Your chain |
+|---|---|
+| "research / deep-dive SYM" | `qr data freshness` → refresh stale scopes → `qr research bundle SYM` → `qr earnings SYM` → `qr value SYM` → synthesize a thesis |
+| "screen for X, value the best" | `qr screen run --expr/--technical "..."` → `qr value` on the top names |
+| "morning call / how's my portfolio" | `qr morningcall` (optionally `--save`) |
+| "did my decisions beat the market" | `qr ledger track` → `qr ledger scorecard --group-by confidence\|sector\|tag` |
+| "backtest STRATEGY on SYM" | `qr backtest run ...` → `qr backtest show <run_id>` for the curve/trades |
+| "is factor F predictive" | `qr signal research --factor F --horizon ...` |
+| "value SYM / is it cheap" | `qr value SYM --model all` (+ `qr screen` for a relative read) |
+| "record that I bought SYM because…" | `qr ledger add SYM --side buy --thesis "..." --confidence N` |
+
+**Orchestration rules:**
+
+- **Freshness first.** Before reading warehouse data for a symbol, consider
+  `qr data freshness`; refresh stale scopes (the report's `stale_symbols` feeds
+  `qr data refresh --symbols`). Don't blindly `--force` — it spends FMP quota.
+- **Benchmarks must exist.** Ledger alpha needs SPY + sector ETFs in the universe
+  and quote-refreshed, or the alpha column is null. Add them via `qr universe set`.
+- **Soft-fails are fine.** News / transcript / dividend-adjusted 402 → the rest
+  still works; never abort the chain over a missing premium endpoint.
+- **You write the prose.** The tool returns structured data only — the narrative,
+  judgment, and recommendation are yours. Don't dump raw envelopes at the human.
+- **Reproducibility.** `qr ledger add` snapshots the data behind a decision; cite
+  `snapshot_id` / `as_of` so the call can be replayed and graded later.
 
 ## Project map (read first)
 
