@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from quant_researcher.models.holdings import Holding
+from quant_researcher.models.trades import Trade
 
 _VALID_SOURCES = ("flex", "csv", "manual")
 
@@ -24,6 +25,15 @@ class ImportResult:
     source: str
     account_id: str | None
     as_of_date: date | None
+    imported: int
+    symbols: list[str]
+    skipped: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class TradeImportResult:
+    source: str
+    account_id: str | None
     imported: int
     symbols: list[str]
     skipped: list[dict[str, str]]
@@ -136,6 +146,72 @@ def _csv_to_holding(
         "listing_exchange": None,
         "description": row.get("description") or None,
         "raw": {k: v for k, v in row.items() if k not in {"as_of_date"}},
+    }
+
+
+def import_trades(
+    session: Session,
+    *,
+    payload: list[dict[str, Any]],
+) -> TradeImportResult:
+    """Map raw Flex `<Trade>` attr dicts → `Trade` rows and `session.merge` them.
+
+    An empty `payload` is a legitimate no-trade day (returns `imported=0`),
+    not an error. `merge` keys on `(account_id, ib_exec_id)` so re-pulling the
+    same business day is idempotent.
+    """
+    mapped: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for i, raw in enumerate(payload):
+        try:
+            row = _flex_to_trade(raw)
+            for col in ("account_id", "ib_exec_id", "symbol"):
+                if not row.get(col):
+                    raise ValueError(f"missing {col}")
+            mapped.append(row)
+        except (ValueError, KeyError, TypeError) as exc:
+            skipped.append({"index": str(i), "error": str(exc)})
+
+    for row in mapped:
+        session.merge(Trade(source="flex", **row))
+
+    accounts = {r["account_id"] for r in mapped}
+    return TradeImportResult(
+        source="flex",
+        account_id=next(iter(accounts)) if len(accounts) == 1 else None,
+        imported=len(mapped),
+        symbols=sorted({r["symbol"] for r in mapped}),
+        skipped=skipped,
+    )
+
+
+def _flex_to_trade(row: dict[str, Any]) -> dict[str, Any]:
+    """Map raw IBKR Flex `<Trade>` attribute dict → Trade kwargs."""
+    return {
+        "account_id": row.get("accountId") or "",
+        "ib_exec_id": row.get("ibExecID") or "",
+        "trade_id": row.get("tradeID") or None,
+        "symbol": row.get("symbol") or "",
+        "conid": _as_int(row.get("conid")),
+        "asset_category": row.get("assetCategory") or "STK",
+        "sub_category": row.get("subCategory") or None,
+        "description": row.get("description") or None,
+        "trade_date": _parse_flex_date(row.get("tradeDate")),
+        "executed_at": row.get("dateTime") or None,
+        "side": row.get("buySell") or None,
+        "quantity": _as_float(row.get("quantity")) or 0.0,
+        "price": _as_float(row.get("tradePrice")),
+        "proceeds": _as_float(row.get("proceeds")),
+        "net_cash": _as_float(row.get("netCash")),
+        "commission": _as_float(row.get("ibCommission")),
+        "realized_pnl": _as_float(row.get("fifoPnlRealized")),
+        "open_close": row.get("openCloseIndicator") or None,
+        "order_reference": row.get("orderReference") or None,
+        "exchange": row.get("exchange") or None,
+        "currency": row.get("currency") or None,
+        "fx_rate_to_base": _as_float(row.get("fxRateToBase")),
+        "notes": row.get("notes") or row.get("code") or None,
+        "raw": dict(row),
     }
 
 

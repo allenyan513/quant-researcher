@@ -1268,6 +1268,143 @@ def test_holdings_sync_happy_path(memory_db, monkeypatch) -> None:
     assert data["statement"]["query_name"] == "Live"
 
 
+# ----- ME: qr trades -------------------------------------------------------
+
+
+def test_trades_help_lists_subcommands() -> None:
+    result = runner.invoke(app, ["trades", "--help"])
+    assert result.exit_code == 0
+    for sub in ("sync", "list"):
+        assert sub in result.output
+
+
+def test_trades_sync_missing_token(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = None
+    fake_settings.flex_query_id_live = "1440609"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["trades", "sync"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "missing_flex_token"
+
+
+def test_trades_sync_missing_query_id(memory_db, monkeypatch) -> None:
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = "secret"
+    fake_settings.flex_query_id_live = None
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+    result = runner.invoke(app, ["trades", "sync"])
+    assert result.exit_code == 1
+    assert _json_lines(result.output)[0]["error"]["code"] == "missing_flex_query_id"
+
+
+def _fake_trades_flex(monkeypatch, trades_payload: list[dict]) -> None:
+    """Patch settings + FlexClient so `fetch_trades` returns `trades_payload`."""
+    fake_settings = MagicMock()
+    fake_settings.flex_token_key = "secret"
+    fake_settings.flex_query_id_live = "1440609"
+    monkeypatch.setattr("quant_researcher.cli.settings", lambda: fake_settings)
+
+    from quant_researcher.holdings.ibkr_flex import FlexStatementMeta
+
+    fake_flex = MagicMock()
+    fake_flex.__enter__.return_value = fake_flex
+    fake_flex.__exit__.return_value = None
+    fake_flex.fetch_trades.return_value = (
+        FlexStatementMeta(
+            account_id="U16781493",
+            from_date="20260519",
+            to_date="20260519",
+            when_generated="20260520;070016",
+            query_name="Live",
+        ),
+        trades_payload,
+    )
+    monkeypatch.setattr(
+        "quant_researcher.holdings.ibkr_flex.FlexClient", lambda **_: fake_flex
+    )
+
+
+def test_trades_sync_happy_path(memory_db, monkeypatch) -> None:
+    _fake_trades_flex(
+        monkeypatch,
+        [
+            {
+                "accountId": "U16781493",
+                "symbol": "AAPL",
+                "ibExecID": "0000e0d5.000abc12.01.01",
+                "tradeID": "7228851234",
+                "assetCategory": "STK",
+                "tradeDate": "20260519",
+                "dateTime": "20260519;101512",
+                "buySell": "BUY",
+                "quantity": "100",
+                "tradePrice": "200.5",
+                "ibCommission": "-1.0",
+                "currency": "USD",
+            }
+        ],
+    )
+    result = runner.invoke(app, ["trades", "sync"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["source"] == "flex"
+    assert data["imported"] == 1
+    assert data["symbols"] == ["AAPL"]
+    assert data["account_id"] == "U16781493"
+    assert data["statement"]["query_name"] == "Live"
+
+
+def test_trades_sync_empty_day_succeeds(memory_db, monkeypatch) -> None:
+    """A no-trade business day returns 0 imports and exit 0 (not an error)."""
+    _fake_trades_flex(monkeypatch, [])
+    result = runner.invoke(app, ["trades", "sync"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["imported"] == 0
+    assert data["symbols"] == []
+    assert data["account_id"] is None
+
+
+def test_trades_list_filters_by_symbol(memory_db, monkeypatch) -> None:
+    _fake_trades_flex(
+        monkeypatch,
+        [
+            {
+                "accountId": "U1",
+                "symbol": "AAPL",
+                "ibExecID": "exec-1",
+                "assetCategory": "STK",
+                "tradeDate": "20260519",
+                "dateTime": "20260519;101512",
+                "buySell": "BUY",
+                "quantity": "100",
+                "tradePrice": "200.5",
+            },
+            {
+                "accountId": "U1",
+                "symbol": "MSFT",
+                "ibExecID": "exec-2",
+                "assetCategory": "STK",
+                "tradeDate": "20260519",
+                "dateTime": "20260519;110000",
+                "buySell": "BUY",
+                "quantity": "50",
+                "tradePrice": "310.0",
+            },
+        ],
+    )
+    runner.invoke(app, ["trades", "sync"])
+
+    result = runner.invoke(app, ["trades", "list", "--symbol", "AAPL"])
+    assert result.exit_code == 0
+    data = _json_lines(result.output)[0]["data"]
+    assert data["count"] == 1
+    assert data["trades"][0]["symbol"] == "AAPL"
+    assert data["trades"][0]["ib_exec_id"] == "exec-1"
+    assert data["trades"][0]["side"] == "BUY"
+
+
 def test_data_refresh_all_scope_covers_every_table(memory_db, data_env) -> None:
     _seed_universe(memory_db, ["AAPL"])
     data_env.get_profile.return_value = {"symbol": "AAPL", "sector": "Tech"}

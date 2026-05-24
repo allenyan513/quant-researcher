@@ -35,6 +35,7 @@ stdout — `{ok, data, as_of, data_freshness, code_version, error}` — exit 0 =
 | `qr screen list / runs / diff / fields` | saved screens · run history · diff two runs · valid fields |
 | `qr value SYM [--model dcf\|peg\|multiples\|all] [--assumptions JSON]` | valuation + sensitivity, snapshotted |
 | `qr holdings sync / import-csv / list / history` | IBKR Flex or CSV positions |
+| `qr trades sync / list` | IBKR Flex executed fills (per-execution, idempotent) |
 | `qr morningcall [--account A] [--as-of ...] [--save]` | per-holding + portfolio briefing |
 | `qr research bundle SYM` / `news` / `list` / `show` | one-shot research aggregate |
 | `qr earnings SYM [--limit N] [--transcript]` | actual-vs-estimate + recorded thesis |
@@ -54,6 +55,7 @@ stdout — `{ok, data, as_of, data_freshness, code_version, error}` — exit 0 =
 | "is factor F predictive" | `qr signal research --factor F --horizon ...` |
 | "value SYM / is it cheap" | `qr value SYM --model all` (+ `qr screen` for a relative read) |
 | "record that I bought SYM because…" | `qr ledger add SYM --side buy --thesis "..." --confidence N` |
+| "what did I actually trade (last session)" | `qr trades sync` → `qr trades list [--symbol SYM] [--since DATE]` |
 
 **Orchestration rules:**
 

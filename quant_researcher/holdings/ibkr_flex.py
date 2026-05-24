@@ -7,9 +7,10 @@ Two-step flow:
    meaning "still generating, retry shortly". We poll up to
    `max_poll_attempts` times with `poll_delay` seconds between calls.
 
-The client returns the meta + a list of raw attribute dicts per
-`<OpenPosition>`. Field mapping → SQLAlchemy columns lives in
-`holdings/importer.py` — the client is a thin XML-to-Python translator.
+The client returns the meta + a list of raw attribute dicts per row
+(`<OpenPosition>` for `fetch_positions`, `<Trade>` for `fetch_trades`).
+Field mapping → SQLAlchemy columns lives in `holdings/importer.py` — the
+client is a thin XML-to-Python translator.
 
 Schema reference (from a real Flex Live-Positions response, 2026-05-21):
 * `accountId`, `symbol`, `description`, `currency`, `assetCategory` (STK/OPT),
@@ -88,7 +89,19 @@ class FlexClient:
         """End-to-end: send request, poll until ready, return (meta, positions)."""
         ref = self._send_request(str(query_id))
         xml_text = self._poll_statement(ref)
-        return self._parse(xml_text)
+        return self._parse(xml_text, "OpenPositions", "OpenPosition")
+
+    def fetch_trades(
+        self, query_id: str | int
+    ) -> tuple[FlexStatementMeta, list[dict[str, str]]]:
+        """End-to-end: send request, poll until ready, return (meta, trades).
+
+        Requires the Flex Query to include the **Trades** section (a no-trade
+        period yields an empty list, not an error).
+        """
+        ref = self._send_request(str(query_id))
+        xml_text = self._poll_statement(ref)
+        return self._parse(xml_text, "Trades", "Trade")
 
     def close(self) -> None:
         self._client.close()
@@ -175,7 +188,14 @@ class FlexClient:
             f"GetStatement still pending after {self._max_polls} attempts: {last_err}"
         )
 
-    def _parse(self, xml_text: str) -> tuple[FlexStatementMeta, list[dict[str, str]]]:
+    def _parse(
+        self, xml_text: str, container_tag: str, row_tag: str
+    ) -> tuple[FlexStatementMeta, list[dict[str, str]]]:
+        """Parse the statement header + every `<row_tag>` under `<container_tag>`.
+
+        A missing/empty section yields an empty row list (legitimate for a
+        no-trade period), not an error.
+        """
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError as exc:
@@ -193,9 +213,9 @@ class FlexClient:
             when_generated=stmt.get("whenGenerated", ""),
             query_name=root.get("queryName", ""),
         )
-        positions: list[dict[str, Any]] = []
-        ops_container = stmt.find("OpenPositions")
-        if ops_container is not None:
-            for op in ops_container.findall("OpenPosition"):
-                positions.append(dict(op.attrib))
-        return meta, positions
+        rows: list[dict[str, Any]] = []
+        container = stmt.find(container_tag)
+        if container is not None:
+            for el in container.findall(row_tag):
+                rows.append(dict(el.attrib))
+        return meta, rows

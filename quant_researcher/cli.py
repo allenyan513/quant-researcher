@@ -57,6 +57,13 @@ holdings_app = typer.Typer(
 )
 app.add_typer(holdings_app)
 
+trades_app = typer.Typer(
+    name="trades",
+    help="Trades (ME) — sync executed fills from IBKR Flex / list.",
+    no_args_is_help=True,
+)
+app.add_typer(trades_app)
+
 research_app = typer.Typer(
     name="research",
     help="Research data packages (MD) — bundle aggregator + news refresh.",
@@ -387,6 +394,169 @@ def _sum_floats(items: list[dict], key: str) -> float | None:
     if not vals:
         return None
     return sum(vals)
+
+
+# ---------------------------------------------------------------------------
+# qr trades ...
+# ---------------------------------------------------------------------------
+
+
+@trades_app.command("sync")
+def trades_sync(
+    account_override: str | None = typer.Option(
+        None,
+        "--account",
+        help="Override account_id (defaults to value in Flex statement).",
+    ),
+    max_attempts: int = typer.Option(
+        6, "--max-attempts", help="Max poll attempts (see `holdings sync`). Default 6."
+    ),
+    poll_delay: float = typer.Option(
+        8.0, "--poll-delay", help="Seconds between poll attempts. Default 8."
+    ),
+) -> None:
+    """Pull executed trades from IBKR Flex (FLEX_TOKEN_KEY + FLEX_QUERY_ID_LIVE).
+
+    Reuses the live query (which must include the Trades section). A no-trade
+    period imports 0 rows and still succeeds.
+    """
+    from quant_researcher.db import session_factory
+    from quant_researcher.holdings.ibkr_flex import FlexClient, FlexError
+    from quant_researcher.holdings.importer import import_trades
+
+    cfg = settings()
+    if not cfg.flex_token_key:
+        _emit(
+            Envelope.failure("missing_flex_token", "FLEX_TOKEN_KEY is not set in .env.")
+        )
+    if not cfg.flex_query_id_live:
+        _emit(
+            Envelope.failure(
+                "missing_flex_query_id", "FLEX_QUERY_ID_LIVE is not set in .env."
+            )
+        )
+
+    try:
+        with FlexClient(
+            token=cfg.flex_token_key,
+            max_poll_attempts=max_attempts,
+            poll_delay=poll_delay,
+        ) as flex:
+            meta, raw_trades = flex.fetch_trades(cfg.flex_query_id_live)
+        if account_override:
+            for row in raw_trades:
+                row["accountId"] = account_override
+        with session_factory()() as sess, sess.begin():
+            result = import_trades(sess, payload=raw_trades)
+    except FlexError as exc:
+        _emit(Envelope.failure("flex_fetch_failed", str(exc)))
+    except Exception as exc:
+        _emit(Envelope.failure("trades_sync_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "source": "flex",
+                    "account_id": result.account_id,
+                    "imported": result.imported,
+                    "symbols": result.symbols,
+                    "skipped": result.skipped,
+                    "statement": {
+                        "query_name": meta.query_name,
+                        "from_date": meta.from_date,
+                        "to_date": meta.to_date,
+                        "when_generated": meta.when_generated,
+                    },
+                },
+                data_freshness={"flex": "live"},
+            )
+        )
+
+
+@trades_app.command("list")
+def trades_list(
+    account: str | None = typer.Option(
+        None, "--account", "-a", help="Filter to a specific account_id."
+    ),
+    symbol: str | None = typer.Option(
+        None, "--symbol", "-s", help="Filter to a specific symbol."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only trades on/after this date (YYYY-MM-DD)."
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-l", help="Most-recent N rows (default 50)."
+    ),
+) -> None:
+    """List recorded trades (newest first)."""
+    from datetime import date as _date
+
+    from sqlalchemy import select
+
+    from quant_researcher.db import session_factory
+    from quant_researcher.models.trades import Trade
+
+    since_date: _date | None = None
+    if since is not None:
+        try:
+            since_date = _date.fromisoformat(since)
+        except ValueError:
+            _emit(
+                Envelope.failure(
+                    "invalid_since", f"--since must be YYYY-MM-DD, got {since!r}"
+                )
+            )
+
+    try:
+        with session_factory()() as sess:
+            stmt = select(Trade)
+            if account:
+                stmt = stmt.where(Trade.account_id == account)
+            if symbol:
+                stmt = stmt.where(Trade.symbol == symbol.upper())
+            if since_date is not None:
+                stmt = stmt.where(Trade.trade_date >= since_date)
+            stmt = stmt.order_by(
+                Trade.trade_date.desc(), Trade.executed_at.desc()
+            ).limit(limit)
+            rows = list(sess.scalars(stmt))
+            items = [_trade_to_dict(t) for t in rows]
+    except Exception as exc:
+        _emit(Envelope.failure("trades_list_failed", str(exc)))
+    else:
+        _emit(
+            Envelope.success(
+                data={
+                    "count": len(items),
+                    "filter": {"account": account, "symbol": symbol, "since": since},
+                    "trades": items,
+                },
+                data_freshness={"db": "live"},
+            )
+        )
+
+
+def _trade_to_dict(t: Any) -> dict[str, Any]:
+    return {
+        "account_id": t.account_id,
+        "ib_exec_id": t.ib_exec_id,
+        "trade_id": t.trade_id,
+        "symbol": t.symbol,
+        "asset_category": t.asset_category,
+        "sub_category": t.sub_category,
+        "trade_date": _iso(t.trade_date),
+        "executed_at": t.executed_at,
+        "side": t.side,
+        "quantity": t.quantity,
+        "price": t.price,
+        "proceeds": t.proceeds,
+        "net_cash": t.net_cash,
+        "commission": t.commission,
+        "realized_pnl": t.realized_pnl,
+        "open_close": t.open_close,
+        "currency": t.currency,
+        "source": t.source,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,8 @@ on:
   schedule:
     - cron: "0 23 * * 1-5"   # weekdays 23:00 UTC (~19:00 EDT / 18:00 EST) — daily prices
     - cron: "0 8 * * 6"      # Saturday 08:00 UTC — weekly fundamentals + decision tracking
-  workflow_dispatch: {}       # manual trigger (also runs both jobs, for testing)
+    - cron: "0 12 * * 2-6"   # Tue-Sat 12:00 UTC (~07-08 ET) — prior session's IBKR trades
+  workflow_dispatch: {}       # manual trigger (also runs all jobs, for testing)
 
 concurrency:
   group: data-refresh
@@ -62,3 +63,25 @@ jobs:
           uv run qr data refresh --scope estimates --periods annual
       - name: Track decision forward-returns
         run: uv run qr ledger track
+
+  daily-trades:
+    # weekday-morning cron + manual dispatch. Pulls the prior session's fills:
+    # IBKR Activity Flex is unreliable intraday, so the query's period must be
+    # "Last Business Day" and we run after overnight processing settles.
+    # Needs two extra repo secrets: FLEX_TOKEN_KEY + FLEX_QUERY_ID_LIVE (the
+    # live query, with the Trades section ticked on the IBKR side).
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 12 * * 2-6'
+    runs-on: ubuntu-latest
+    env:
+      FLEX_TOKEN_KEY: ${{ secrets.FLEX_TOKEN_KEY }}
+      FLEX_QUERY_ID_LIVE: ${{ secrets.FLEX_QUERY_ID_LIVE }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Sync deps
+        run: uv sync --frozen
+      - name: Sync trades (IBKR Flex, Last Business Day)
+        run: uv run qr trades sync

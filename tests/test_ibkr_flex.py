@@ -33,6 +33,29 @@ _SAMPLE_QUERY_RESPONSE = """<FlexQueryResponse queryName="Live" type="AF">
 </FlexStatements>
 </FlexQueryResponse>"""
 
+_SAMPLE_TRADES_RESPONSE = """<FlexQueryResponse queryName="Live" type="AF">
+<FlexStatements count="1">
+<FlexStatement accountId="U16781493" fromDate="20260519"
+ toDate="20260519" period="LastBusinessDay" whenGenerated="20260520;070016">
+<Trades>
+<Trade accountId="U16781493" symbol="AAPL" description="APPLE INC"
+ conid="265598" assetCategory="STK" subCategory="COMMON" currency="USD"
+ tradeID="7228851234" ibExecID="0000e0d5.000abc12.01.01" tradeDate="20260519"
+ dateTime="20260519;101512" buySell="BUY" quantity="100" tradePrice="200.5"
+ ibCommission="-1.0" netCash="-20051.0" proceeds="-20050.0"
+ fifoPnlRealized="0" openCloseIndicator="O" orderReference="my-order-1"
+ exchange="NASDAQ" fxRateToBase="1" notes="P"/>
+<Trade accountId="U16781493" symbol="META  260821P00530000" description="META PUT"
+ conid="999999" assetCategory="OPT" subCategory="PUT" currency="USD"
+ tradeID="7228859999" ibExecID="0000e0d5.000abc99.01.01" tradeDate="20260519"
+ dateTime="20260519;143000" buySell="SELL" quantity="-1" tradePrice="14.5"
+ ibCommission="-0.7" netCash="1449.3" proceeds="1450.0"
+ fifoPnlRealized="57.5" openCloseIndicator="C" exchange="CBOE" fxRateToBase="1"/>
+</Trades>
+</FlexStatement>
+</FlexStatements>
+</FlexQueryResponse>"""
+
 _SEND_OK = """<FlexStatementResponse timestamp='21 May, 2026 09:25 AM EDT'>
 <Status>Success</Status>
 <ReferenceCode>1234567890</ReferenceCode>
@@ -226,6 +249,57 @@ def test_empty_open_positions_returns_empty_list(client: FlexClient) -> None:
     )
     meta, positions = client.fetch_positions(1440609)
     assert positions == []
+    assert meta.account_id == "U1"
+
+
+# ----- trades -------------------------------------------------------------
+
+
+@respx.mock
+def test_fetch_trades_happy_path(client: FlexClient) -> None:
+    respx.get(f"{BASE}/FlexStatementService.SendRequest").mock(
+        return_value=httpx.Response(200, text=_SEND_OK)
+    )
+    respx.get(f"{BASE}/FlexStatementService.GetStatement").mock(
+        return_value=httpx.Response(200, text=_SAMPLE_TRADES_RESPONSE)
+    )
+    meta, trades = client.fetch_trades(1440609)
+
+    assert meta.account_id == "U16781493"
+    assert meta.from_date == "20260519"
+    assert len(trades) == 2
+    t1 = trades[0]
+    assert t1["symbol"] == "AAPL"
+    assert t1["ibExecID"] == "0000e0d5.000abc12.01.01"
+    assert t1["buySell"] == "BUY"
+    assert t1["tradePrice"] == "200.5"
+    # OCC option symbol preserved verbatim (double space), short qty negative.
+    t2 = trades[1]
+    assert t2["symbol"] == "META  260821P00530000"
+    assert t2["quantity"] == "-1"
+    assert t2["assetCategory"] == "OPT"
+
+
+@respx.mock
+def test_fetch_trades_empty_section_returns_empty(client: FlexClient) -> None:
+    """A no-trade business day yields an empty list, not an error."""
+    respx.get(f"{BASE}/FlexStatementService.SendRequest").mock(
+        return_value=httpx.Response(200, text=_SEND_OK)
+    )
+    respx.get(f"{BASE}/FlexStatementService.GetStatement").mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                '<FlexQueryResponse queryName="Live" type="AF">'
+                '<FlexStatements count="1">'
+                '<FlexStatement accountId="U1" fromDate="20260519"'
+                ' toDate="20260519" period="x" whenGenerated="20260520;000000">'
+                "<Trades></Trades></FlexStatement></FlexStatements></FlexQueryResponse>"
+            ),
+        )
+    )
+    meta, trades = client.fetch_trades(1440609)
+    assert trades == []
     assert meta.account_id == "U1"
 
 
