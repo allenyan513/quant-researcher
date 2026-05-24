@@ -129,16 +129,22 @@ def refresh_quotes(
     Fetches raw OHLCV from `/historical-price-eod/full` AND the split/dividend-
     adjusted stream from `/historical-price-eod/dividend-adjusted`, joining each
     `adjClose` onto its bar by date so `adj_close` is populated (`/full` omits
-    it). Both calls share the `try`: an adjusted-endpoint failure fails the
-    symbol (per-symbol isolation) rather than silently storing unadjusted prices
-    — `adj_close` is what the signal panel / backtest feed / ledger consume.
+    it). Both calls share the `try`: a TRANSIENT adjusted-endpoint error
+    (429/5xx) fails the symbol — it self-heals next run, since `since` restarts
+    at the last STORED date — rather than silently storing unadjusted prices. A
+    402 instead soft-fails inside `get_adjusted_prices` → `[]`, so raw bars still
+    ingest with `adj_close=None` (panel fallback) rather than a plan gate halting
+    ALL quote ingestion.
 
-    Ingest is append-only (dedup on existing `trade_date`), so this only sets
-    `adj_close` on NEW bars. `--force` does NOT backfill history: it re-fetches
-    the same incremental window and the row-level dedup skips dates already
-    stored. To backfill existing rows, delete them (or the table) and re-run
-    `qr data refresh --scope quote`, or run a one-off UPDATE from the adjusted
-    endpoint.
+    Ingest is append-only (dedup on existing `trade_date`): this only sets
+    `adj_close` on NEW bars and never revises existing rows. Two consequences:
+    (1) a split/dividend re-scales FMP's WHOLE adjusted series, but old rows keep
+    their prior `adj_close` → they go STALE; (2) if `/full` publishes a bar
+    before `/dividend-adjusted` does, that bar is stored with `adj_close=None`
+    and never corrected. `--force` repairs neither (it re-fetches only the
+    incremental window; dedup skips stored dates). To repair existing rows,
+    re-run `scripts/backfill_adj_close.py` (idempotent, updates in place) — e.g.
+    after a corporate action.
 
     `only_stale=True` (default since MA-4) narrows `symbols` via
     `stale_symbols("quote", ...)` before any FMP call.

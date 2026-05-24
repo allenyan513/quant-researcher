@@ -98,10 +98,22 @@ class FMPClient:
         and `volume` — but NO raw `close`. `refresh_quotes` joins each `adjClose`
         onto the matching `/full` bar by date so `daily_prices.adj_close` is
         populated. Field names verified against FMP /stable 2026-05-23.
+
+        Returns `[]` on HTTP 402 (premium-gated on lighter plans), matching
+        `get_news` / `get_earnings_transcript`. This keeps `refresh_quotes`
+        ingesting the raw `/full` bars (with `adj_close=None`, the panel's
+        documented fallback) instead of a plan gate on this enrichment endpoint
+        halting ALL quote ingestion. Transient errors (429/5xx) still raise so
+        they retry next run.
         """
-        return self._get_price_history(
-            "/historical-price-eod/dividend-adjusted", symbol, since
-        )
+        try:
+            return self._get_price_history(
+                "/historical-price-eod/dividend-adjusted", symbol, since
+            )
+        except FMPError as exc:
+            if exc.status_code == 402:
+                return []
+            raise
 
     def _get_price_history(
         self, path: str, symbol: str, since: date | None

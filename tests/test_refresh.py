@@ -320,11 +320,39 @@ def test_refresh_quotes_adj_close_none_when_no_adjusted_match(
     assert row.adj_close is None
 
 
+def test_refresh_quotes_adj_close_partial_overlap(
+    session: Session, fmp: MagicMock
+) -> None:
+    # Adjusted stream covers only some /full dates → matched bars get adj_close,
+    # unmatched bars stay None. Guards against join-key (date) drift.
+    fmp.get_historical_prices.return_value = [
+        {"date": "2024-01-02", "close": 10.0, "volume": 100},
+        {"date": "2024-01-03", "close": 11.0, "volume": 100},
+        {"date": "2024-01-04", "close": 12.0, "volume": 100},
+    ]
+    fmp.get_adjusted_prices.return_value = [
+        {"date": "2024-01-02", "adjClose": 9.5},
+        {"date": "2024-01-04", "adjClose": 11.5},
+    ]
+    refresh_quotes(session, fmp, ["AAPL"])
+    session.commit()
+
+    rows = sorted(
+        session.scalars(select(DailyPrice).where(DailyPrice.symbol == "AAPL")),
+        key=lambda r: r.trade_date,
+    )
+    assert [r.trade_date for r in rows] == [
+        date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
+    ]
+    assert [r.adj_close for r in rows] == [9.5, None, 11.5]
+
+
 def test_refresh_quotes_adjusted_endpoint_failure_fails_symbol(
     session: Session, fmp: MagicMock
 ) -> None:
-    # An adjusted-endpoint error fails the symbol rather than storing a bar with
-    # a missing adj_close (per-symbol isolation; no rows inserted that run).
+    # A TRANSIENT adjusted-endpoint error (429/5xx) fails the symbol rather than
+    # storing a bar with a missing adj_close — it self-heals next run (vs 402,
+    # which soft-fails to [] inside get_adjusted_prices; see test_fmp.py).
     fmp.get_historical_prices.return_value = [
         {"date": "2024-01-02", "close": 10.5, "volume": 100},
     ]
