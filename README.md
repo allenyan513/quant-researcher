@@ -111,12 +111,29 @@ the tool **without** a paid key is on the roadmap.
 You **do not need IBKR**. Holdings come from either:
 
 - **CSV (any broker).** Export positions from Schwab, Fidelity, Robinhood,
-  Vanguard — anything — and Claude imports them (required columns: `account_id,
-  symbol, quantity, as_of_date`; common optionals like `avg_cost`, `mark_price`
-  supported).
+  Vanguard — anything — map them to the small `qr` schema, and Claude imports them.
+  Start from [`config/holdings.sample.csv`](config/holdings.sample.csv) (required
+  columns `account_id, symbol, quantity, as_of_date`; optional `avg_cost,
+  mark_price, market_value, currency, asset_category, side, description`).
 - **IBKR Flex (optional automation).** If you *do* use Interactive Brokers, set
   `FLEX_TOKEN_KEY` / `FLEX_QUERY_ID_LIVE` and Claude can pull a snapshot for you.
   It's pure convenience over the same importer.
+
+**Mapping a broker export to the `qr` schema.** Brokers name their columns
+differently — rename them to match the template. Common mappings:
+
+| `qr` column | Schwab | Fidelity | Robinhood |
+|---|---|---|---|
+| `symbol` | Symbol | Symbol | Instrument |
+| `quantity` | Qty / Quantity | Quantity | Shares / Quantity |
+| `avg_cost` | Cost Basis Per Share | Average Cost Basis | Average Cost |
+| `mark_price` | Price | Last Price | Price |
+| `market_value` | Market Value | Current Value | Equity |
+
+`account_id` and `as_of_date` usually aren't in an export — set `account_id` to any
+stable label for the account and `as_of_date` to the export date (`YYYY-MM-DD`).
+Column names vary by broker version and account type, so treat this as a starting
+point and adjust to your actual export.
 
 ## For the agent (and contributors)
 
