@@ -1666,7 +1666,8 @@ def data_refresh(
     """Refresh FMP-sourced warehouse tables for the active universe.
 
     `--scope profile`: replace `profiles` rows from FMP `/profile`.
-    `--scope quote`: append new OHLCV bars to `daily_prices`.
+    `--scope quote`: append new OHLCV bars to `daily_prices` and re-fetch a
+    trailing window to heal recently-stored preliminary bars.
     `--scope financials`: ingest income / balance sheet / cash flow (annual +
     quarterly, `known_at = acceptedDate` per D6).
     `--scope ratios`: `/ratios` rows per period (`known_at = now`).
