@@ -9,15 +9,15 @@
 ## 2. 实现决策(I1–I8)
 
 - **I1 接口 = CLI 优先,JSON 契约。** 单一可执行 `qr`,子命令即能力原语;stdout 输出稳定 JSON 信封。Claude Code 经 Bash 组合调用。后续若需要,MCP 可作薄适配层包同一核心库(v1 不做)。
-- **I2 数据层 = SQLAlchemy 2.x(声明式 model)+ Supabase Postgres(用户自建独立项目,与 valuescope 隔离)。无 Alembic、无 docker-compose(D11)。** Schema 由 `Base.metadata.create_all(checkfirst=True)` 经 `qr db init` 幂等应用;演进=手写 SQL(Supabase dashboard)或新增 model 后重跑 `init`(仅添加表/列安全;改/删需手工 ALTER)。schema 形态照搬 valuescope 成熟设计(D1:模式参考)。`QR_DATABASE_URL` 仍是任意 Postgres DSN,但 v1 不文档化备选后端。Pro tier 已用,无 free-tier 暂停问题。
+- **I2 数据层 = SQLAlchemy 2.x(声明式 model)+ Neon Postgres(serverless;用户自建独立项目)。无 Alembic、无 docker-compose(D11)。** Schema 由 `Base.metadata.create_all(checkfirst=True)` 经 `qr db init` 幂等应用;演进=手写 SQL(Neon console SQL Editor)或新增 model 后重跑 `init`(仅添加表/列安全;改/删需手工 ALTER)。schema 形态照搬 valuescope 成熟设计(D1:模式参考)。`QR_DATABASE_URL` 仍是任意 Postgres DSN,但 v1 不文档化备选后端。Neon scale-to-zero 首查自动唤醒,无 free-tier 整体暂停问题(D12)。
 - **I3 节奏 = 逐域做扎实,D4 顺序** A → B → C →(D/E/F)→ G → H,每域达可用再下一个。
 - **I4 复用 quant-engine = 移植其紧依赖簇**(指标 + 回测引擎 + 分析)进本仓库,命名空间化,不作硬依赖/子模块(D5)。
 - **I5 复用 valuescope = 仅模式参考**(估值数学、仓库 schema、分层刷新编排),Python 重写,不引用其代码/DB(D1)。
-- **I6 工具链 = Python 3.13 + uv**(本机已确认;无 poetry/pyenv)。**Supabase 项目用户自建**(单独项目,Pro tier);无本地 Postgres / docker compose(D11)。
+- **I6 工具链 = Python 3.13 + uv**(本机已确认;无 poetry/pyenv)。**Neon 项目用户自建**(serverless Postgres,见 D12);无本地 Postgres / docker compose(D11)。
 - **I7 配置/密钥(D8)** = `.env`(git-ignored)+ `.env.example`;watchlist 走 `config/watchlist.txt`(git-ignored,附 `.sample`)。env 名:`QR_DATABASE_URL`、`FMP_API_KEY`、`FRED_API_KEY`(可选)、`FLEX_TOKEN_KEY`/`FLEX_QUERY_ID_LIVE`(E 阶段)。
 - **I8 边界** = 后端只供结构化数据;Notion/排版/叙述交给 Claude 与现有 skills(features.md 既定边界)。后端不写 Notion。
 
-> 已对 features.md 追加 **D9 + D10 + D11**:D9 修订设计原则 3「本地、可离线」→「自有仓库,存储后端 DSN 可配置」并记录实现期决策;D10 默认 Supabase Postgres(独立项目,与 valuescope 隔离);**D11**(最终)精简 DB 工具链——取消 Alembic 与 docker-compose,schema 走 `Base.metadata.create_all` via `qr db init`;Supabase Pro 已购,无暂停顾虑。
+> 已对 features.md 追加 **D9 + D10 + D11 + D12**:D9 修订设计原则 3「本地、可离线」→「自有仓库,存储后端 DSN 可配置」并记录实现期决策;D10 默认 Supabase Postgres;**D11** 精简 DB 工具链——取消 Alembic 与 docker-compose,schema 走 `Base.metadata.create_all` via `qr db init`;**D12**(2026-05-23)DB 后端迁 Supabase → Neon(serverless,scale-to-zero;DSN normalize 早已 provider-agnostic 故零代码改动)。
 
 ## 3. 架构总览
 
@@ -65,16 +65,18 @@ quant-researcher/
 
 ## 5. CLI 命令面(= 能力契约)
 
+> 下表为**实际落地的命令面**(随实现对齐;权威以 `qr --help` 与 README「命令速查」为准)。原始设计草案里的命令名(如 `value --models`、`earnings read`、`signal --spec`、scope `prices`)已在实现中收敛为下方形态。
+
 | 域 | 命令 | 输出 |
 |---|---|---|
-| A | `qr db status|init|ping` · `qr data refresh [--scope all\|prices\|financials\|estimates\|profile] [--ticker SYM]` · `qr data freshness` · `qr universe set\|show` | 刷新结果 / 新鲜度 |
-| B | `qr screen run --expr "marketCap>10e9 AND pe>5 AND pe<30 AND forwardPe<pe" [--technical "macd_golden_cross within 5d"] [--save NAME]` · `qr screen list\|show\|diff NAME` | 标的列表(可排序、带 as_of、可 diff) |
-| C | `qr value TICKER [--models dcf_fcff,pe,peg,epv,ddm] [--assume growth=…,wacc=…]` · `qr value history TICKER` | 合理价值区间 + 敏感性 + snapshot_id |
-| D/#6 | `qr research bundle TICKER` · `qr earnings read TICKER` | 结构化数据包 / 财报 actual-vs-est + 论点偏离 |
-| E | `qr holdings load [--source flex\|csv --path …]` · `qr morningcall` | 逐持仓 + 组合数据包(Claude/skill 渲染→Notion) |
-| F | `qr ledger add TICKER --action buy\|sell\|trim\|add\|avoid --thesis … --conviction N --source …` · `qr ledger track` · `qr ledger scorecard` | 决策入账(快照当时数据)/ 1w-6m 超额 vs SPY+行业ETF / 战绩 |
-| G | `qr signal research --spec PATH` · `qr signal list\|show ID` | 因子 IC/分位/衰减 + 版本化信号 |
-| H | `qr backtest run --strategy PATH [--symbols … --start --end]` · `qr backtest list\|show ID` | 指标/成交日志/净值曲线 + run_id |
+| A | `qr db status\|init\|ping` · `qr data refresh [--scope all\|profile\|quote\|financials\|ratios\|estimates] [--symbols A,B] [--force]` · `qr data freshness` · `qr universe set --file PATH\|list` | 刷新结果 / 新鲜度 |
+| B | `qr screen run [--expr "pe<30 and peg<1.5 and sector=='Technology'"] [--technical "above_sma[200],macd_golden_cross[5]"] [--name NAME]` · `qr screen list\|runs\|diff\|fields` | 标的列表(带 as_of、可 diff) |
+| C | `qr value TICKER [--model dcf\|peg\|multiples\|all] [--assumptions '{"growth_rate":0.1,"wacc":0.09}']` | 合理价值 + 敏感性 + snapshot_ids(落 `valuation_snapshots`;EPV/DDM 延后) |
+| D/#6 | `qr research bundle TICKER` · `qr research news\|list\|show` · `qr earnings TICKER [--limit N] [--transcript]` | 结构化数据包 / 财报 actual-vs-est + 论点陈列 |
+| E | `qr holdings sync\|import-csv --file PATH\|list\|history` · `qr morningcall [--account A] [--as-of latest\|YYYY-MM-DD] [--save]` | 逐持仓 + 组合晨报数据包(Claude/skill 渲染→Notion) |
+| F | `qr ledger add TICKER --side buy\|sell [--thesis … --confidence N --tags A,B]` · `qr ledger track` · `qr ledger scorecard --group-by confidence\|sector\|tag` · `qr ledger list\|show` | 决策入账(快照当时数据)/ 1w-6m 超额 vs SPY+行业ETF / 战绩 |
+| G | `qr signal research --factor NAME [--horizon 1w\|1m\|3m\|6m] [--quantiles N] [--rebalance monthly\|weekly]` · `qr signal factors\|list\|runs\|show` | 因子 IC/分位/衰减 + 版本化信号 |
+| H | `qr backtest run --symbols A --start D --end D (--strategy NAME\|--strategy-file PATH) [--benchmark SPY] [--raw]` · `qr backtest list\|show` | 指标/成交日志/净值曲线 + run_id |
 
 ## 6. 仓库 Schema(仿 valuescope + qr 专属)
 

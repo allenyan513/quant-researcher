@@ -6,7 +6,7 @@
 
 ## 状态
 
-**v1 alpha,M0 + MA + MB + MC + ME + MD + MF 已落地(2026-05-21)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile/OHLCV/三大报表/比率/估计刷新、freshness 报告、只刷过期数据、**筛选**、**估值**、**Flex/CSV 持仓快照**、**研究数据包**、**决策账本(snapshot + 1w/1m/3m/6m 跟踪 vs SPY/sector ETF + scorecard)**。下一步 **MG**(信号研究:因子 IC/分位)或 **MH**(回测,移植 quant-engine)。路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
+**v1 八能力域全闭环,M0 + MA(含 MA-5)+ MB + MC + MD + ME + MF + MG + MH 已落地(2026-05-23)。** 目前可用能力:数据库脚手架、Watchlist、FMP 客户端、profile/OHLCV/三大报表/比率/估计刷新、freshness 报告、只刷过期数据、**筛选**(基本面 AST + 技术 DSL)、**估值**(DCF/PEG/倍数)、**Flex/CSV 持仓快照**、**研究数据包**、**组合晨报**、**财报速读**、**决策账本(snapshot + 1w/1m/3m/6m 跟踪 vs SPY/sector ETF + scorecard)**、**信号研究**(因子 IC/分位/衰减)、**回测**(移植 quant-engine,6 个内置策略)。路线图见 [`docs/implementation-plan.md`](docs/implementation-plan.md) §7。
 
 ## 这是什么
 
@@ -15,7 +15,7 @@
 quant-researcher 就是这个串接层 —— 给 Claude Code 用的辅助投研底座:
 
 - **CLI 是唯一接口**(`qr ...`),stdout 输出**稳定 JSON 信封**。Claude Code 经 Bash 调度,在 envelope 间自由组合。
-- **自有数据仓库**(Supabase Postgres),从 FMP 拉数据落地,支持 D6 point-in-time(财报 `known_at` 用 FMP `acceptedDate`)。
+- **自有数据仓库**(Neon Postgres;`QR_DATABASE_URL` 接任意 Postgres DSN),从 FMP 拉数据落地,支持 D6 point-in-time(财报 `known_at` 用 FMP `acceptedDate`)。
 - **可复现**:每条结果都带 `as_of` / `data_freshness` / `code_version` / 可选 `snapshot_id`。
 - **personal-first**:为我自己的 IBKR + Notion + Claude skills 工作流定型。开源但不为通用性牺牲顺手程度。
 
@@ -23,7 +23,7 @@ quant-researcher 就是这个串接层 —— 给 Claude Code 用的辅助投研
 
 ## 快速开始
 
-需要:Python 3.13+、[uv](https://docs.astral.sh/uv/)、Supabase Postgres 项目(或任意 Postgres DSN)、[FMP](https://financialmodelingprep.com) API key。
+需要:Python 3.13+、[uv](https://docs.astral.sh/uv/)、Neon Postgres 项目(或任意 Postgres DSN)、[FMP](https://financialmodelingprep.com) API key。
 
 ```bash
 git clone git@github.com:allenyan513/quant-researcher.git
@@ -34,7 +34,7 @@ cp .env.example .env                                    # 填 QR_DATABASE_URL + 
 $EDITOR .env
 
 uv run qr db ping                                       # 验证连接
-uv run qr db init                                       # 应用 schema (9 张表)
+uv run qr db init                                       # 应用 schema (21 张表)
 uv run qr db status                                     # 查看建出来的表
 
 cp config/watchlist.sample.txt config/watchlist.txt     # 自定义关注池
@@ -155,7 +155,7 @@ uv run qr holdings history --symbol AAPL --limit 30                  # 单票回
 
 | 命令 | 作用 |
 |---|---|
-| `qr db ping` | `SELECT 1`,延迟 + Supabase 防 idle pause 用 |
+| `qr db ping` | `SELECT 1`,延迟 + Neon scale-to-zero 唤醒用 |
 | `qr db init` | `Base.metadata.create_all`(幂等,不改既有列) |
 | `qr db status` | 显示 server_version、expected/present/missing 表 |
 | `qr universe set --file PATH` | 用文件替换 universe 表 + upsert securities |
@@ -187,6 +187,12 @@ uv run qr holdings history --symbol AAPL --limit 30                  # 单票回
 | `qr ledger list [--symbol] [--side]` | 列历次决策 |
 | `qr ledger scorecard --group-by confidence\|sector\|tag [--horizon 1w\|1m\|3m\|6m]` | 按维度看 avg alpha / return |
 | `qr ledger show DECISION_ID` | 单笔决策 + 跟踪表 |
+| `qr morningcall [--account A] [--as-of latest\|YYYY-MM-DD] [--save] [--news N]` | 组合晨报:逐持仓精简视图 + 组合层 sector/movers,可选落 `MorningCallSnapshot` |
+| `qr earnings SYM [--limit N] [--transcript]` | 财报 actual-vs-est surprise + 论点陈列(纯 warehouse;`--transcript` 在线取,402 软失败) |
+| `qr backtest run --symbols A --start D --end D (--strategy NAME\|--strategy-file PATH) [--params k=v,...] [--benchmark SPY] [--raw]` | 回测内置/外部策略,落 `backtest_runs` |
+| `qr backtest list [--strategy X] [--limit N]` · `qr backtest show RUN_ID` | 列回测 run / 看单次(指标+净值+成交) |
+| `qr signal research --factor F [--horizon 1w\|1m\|3m\|6m] [--quantiles N] [--rebalance monthly\|weekly] [--name X]` | 因子 IC/分位/衰减,落 `signals`/`signal_runs` |
+| `qr signal factors` · `qr signal list` · `qr signal runs [--factor F]` · `qr signal show RUN_ID` | 列因子注册表 / 保存信号 / run 历史 / 单次 run |
 
 每个命令在 stdout 输出**正好一个** JSON envelope,exit code 0=ok / 1=error。
 
@@ -241,10 +247,22 @@ quant_researcher/
 │   └── importer.py    flex / csv → Holding 统一上插
 ├── research/
 │   ├── bundler.py     build_bundle (DB → JSON aggregator) + bundle (持久化)
+│   ├── morningcall.py build_morning_call (持仓+仓库 → 组合晨报) + save
+│   ├── earnings.py    read_earnings (actual-vs-est surprise + 论点陈列)
 │   └── refresh.py     refresh_news (FMP /news/stock-latest → news_items dedup)
 ├── ledger/
 │   ├── sectors.py     sector → SPDR ETF 映射 (XLK/XLF/XLE/...)
 │   └── engine.py      record_decision + track_decisions + scorecard
+├── signals/
+│   ├── factors.py     因子注册表 (fundamental 复用 screen FIELDS + price 动量/反转/波动)
+│   ├── panel.py       PIT 面板 (仓库 I/O + PriceSeries numpy)
+│   └── engine.py      run_signal + IC/分位/衰减 + 持久化
+├── backtest/
+│   ├── runner.py      run_backtest 唯一入口 (CLI + Python 都走它)
+│   ├── loader.py      --strategy-file importlib 加载外部 BaseStrategy
+│   └── strategies/    内置策略注册表 (6 个单标的: sma/macd/rsi/bollinger/donchian/buy-hold)
+├── engine/            【移植自 quant-engine】core/strategy/portfolio/indicators/
+│                      data/execution/risk/analytics/engine.py + warehouse_feed.py
 └── models/            SQLAlchemy 声明式 model
     ├── securities.py  symbol master
     ├── universe.py    watchlist 成员
@@ -257,9 +275,12 @@ quant_researcher/
     ├── valuation.py   ValuationSnapshot (一行一模型一估值)
     ├── holdings.py    Holding (PK = account+symbol+as_of_date,每天快照累加)
     ├── research.py    NewsItem (新闻缓存) + ResearchBundle (聚合快照)
-    └── decisions.py   Decision + DecisionTracking (买卖决策 + 远期 alpha 表)
+    ├── decisions.py   Decision + DecisionTracking (买卖决策 + 远期 alpha 表)
+    ├── signals.py     Signal (定义) + SignalRun (IC/分位/衰减 run 快照)
+    ├── backtest.py    BacktestRun (回测 run + 指标 + 净值 + 成交)
+    └── morningcall.py MorningCallSnapshot (组合晨报快照)
 tests/                 pytest, in-memory SQLite + respx mock
-docs/                  features.md (D1–D11) + implementation-plan.md (I1–I8 + M0–MH)
+docs/                  features.md (D1–D12) + implementation-plan.md (I1–I8 + M0–MH)
 config/watchlist.sample.txt   填 ticker,每行一个;# 开头是注释
 ```
 
@@ -322,26 +343,83 @@ uv run qr ledger show <decision_id>
 
 **Tracking 容忍 ±3 天**:某 horizon 的 target_date 附近 3 天内必须有 bar,否则该格写 None(避免拿月初的价格冒充月末)。
 
+### 组合晨报(ME)
+
+```bash
+# 逐持仓精简视图 + 组合层 sector/movers(不是 N 份完整 bundle)
+uv run qr morningcall                                   # 默认全账户、最新持仓、每票 1 条新闻
+uv run qr morningcall --account U1234567 --news 2       # 限定账户、每票 2 条
+uv run qr morningcall --as-of 2026-05-20 --save         # 历史某日 + 落 MorningCallSnapshot
+```
+
+逐持仓:权重 / 盈亏% / 日涨跌(close-to-close) / 精简 ratios / 估值 upside / 1 条新闻 / 关联 decision。组合层:总市值 / 总盈亏 / sector 暴露 / top-bottom movers / 现金。诚实约定:跨币种只 raw sum + note;现金取不到 → None + note。
+
+### 财报速读(D / #6)
+
+```bash
+uv run qr earnings AAPL                                 # 最近 4 期 actual vs 一致预期 + 论点陈列
+uv run qr earnings AAPL --limit 8 --transcript          # 8 期 + 在线取最新纪要摘录(402 软失败)
+```
+
+纯 warehouse 读:把最近 N 期 `income_statement` actual 按共享 PK join `analyst_estimates`,有估值就算 EPS/营收 surprise。**caveat**:估值是 forward + merge 覆盖的 → 历史期 surprise 稀疏,`estimate_available` / `estimates_matched` 把覆盖率摆明,绝不在没估值时暗示 beat/miss。
+
+### 信号研究(MG)
+
+给全 universe 在月度(或周度)rebalance 日按因子排名,量它对**前瞻收益**的预测力(IC / 分位收益 / 衰减):
+
+```bash
+uv run qr signal factors                                # 列因子注册表(fundamental 复用 screen 字段 + price 动量/反转/波动)
+uv run qr signal research --factor momentum_12_1 --horizon 3m
+uv run qr signal research --factor roe --quantiles 5 --rebalance monthly --name "roe_q5"
+uv run qr signal runs --factor momentum_12_1            # run 历史
+uv run qr signal show <run_id>                          # 单次完整 IC/分位/衰减/coverage
+```
+
+**因子**:fundamental(从 `financial_ratios` 取,**PIT 走 `IncomeStatement.known_at`** 防泄漏)+ price(`momentum_12_1` / `momentum_6_1` / `reversal_1m` / `realized_vol_3m`)。**诚实 coverage**:2 年价格 + 每股 ~2 份年报 → 基本面因子准静态、IC 自相关、t-stat 虚高;`coverage.warnings` 在样本薄时明确警告。落 `signals` / `signal_runs` 可复现。
+
+### 回测(MH)
+
+quant-engine 整包移植 + warehouse feed。内置 6 个单标的策略,或 `--strategy-file` 加载外部 `BaseStrategy` 子类:
+
+```bash
+# 内置策略: sma_crossover / buy_and_hold / macd_crossover / bollinger_reversion / rsi_reversion / donchian_breakout
+uv run qr backtest run --symbols AAPL --start 2023-01-01 --end 2025-01-01 \
+  --strategy sma_crossover --params "fast_period=20,slow_period=50"
+
+# 对基准算 alpha/beta(SPY 须在 universe 且已刷 quote)
+uv run qr backtest run --symbols AAPL --start 2023-01-01 --end 2025-01-01 \
+  --strategy macd_crossover --benchmark SPY
+
+# 外部策略文件(本地执行,不沙箱)
+uv run qr backtest run --symbols AAPL --start 2023-01-01 --end 2025-01-01 \
+  --strategy-file ./my_strategy.py --strategy-class MyStrategy
+
+uv run qr backtest list                                 # 列 run + headline 指标
+uv run qr backtest show <run_id>                        # 完整指标 + 净值曲线 + 成交日志
+```
+
+**默认 adjusted**:用 `adj_close/close` factor 回调整根 OHLC(split/dividend 正确),`--raw` 关掉。fee 模型 `zero|per-share|percentage`。落 `backtest_runs`(summary 不含大字段,equity/trades 由 `show` 取)。risk/margin 模块已移植但 CLI v1 不接。
+
 ## 路线图
 
-按 D4 顺序 `A → B → C → D/E/F → G → H` 逐域扎实:
+按 D4 顺序 `A → B → C → D/E/F → G → H` 逐域扎实,**v1 八能力域已全部闭环**:
 
 - **M0** 脚手架 ✅ — uv + `qr` + JSON envelope + SQLAlchemy `Base` + `qr db status|init|ping`
-- **MA** 仓库 + 数据 (域 A) ✅
+- **MA** 仓库 + 数据(域 A)✅
   - **MA-1** ✅ — `universe` / `securities` + `qr universe set/list`
   - **MA-2** ✅ — FMP client + `profiles` / `daily_prices` + `qr data refresh --scope profile|quote`
   - **MA-3** ✅ — 财报三表 + ratios + estimates + `--scope financials|ratios|estimates`
   - **MA-4** ✅ — `qr data freshness` + `qr data refresh` 默认只刷过期 + `--force`
+  - **MA-5** ✅ — `refresh_ratios` 接 `/key-metrics` 补全 ROE/ROA/fcf_yield + `roic`/`earnings_yield`
 - **MB** 筛选 ✅ — AST-sandbox 表达式 + 9 个技术 predicate + `screens` / `screen_runs` + diff
 - **MC** 估值 ✅ — DCF-FCFF + Bloomberg-β WACC + PEG + 行业倍数 + 5×5 sensitivity + `valuation_snapshots`(EPV/DDM 延后)
-- **ME** 持仓 ✅ — IBKR Flex Python client + CSV importer + `holdings` 快照 + `qr holdings sync/import-csv/list/history`(morningcall 数据包延后)
-- **MD** 研究包 ✅ — `news_items` + `research_bundles` + `qr research bundle/news/list/show`(一站聚合所有 warehouse 数据)
+- **MD** 研究包 ✅ — `news_items` + `research_bundles` + `qr research bundle/news/list/show`;另含 `qr earnings`(财报速读)
+- **ME** 持仓 ✅ — IBKR Flex Python client + CSV importer + `holdings` 快照 + `qr holdings sync/import-csv/list/history` + `qr morningcall`(组合晨报)
 - **MF** 决策账本 ✅ — `decisions` + `decision_tracking` + 1w/1m/3m/6m vs SPY+sector ETF + scorecard
-- **MG** 信号研究 / **MH** 回测 — **下一里程碑**
-- **MC** 估值(DCF-FCFF / PEG / 倍数 / EPV / DDM)
-- **MD/ME/MF** 深度研究包 / 持仓 + morning call / 决策账本
-- **MG** 信号研究(因子 IC / 分位 / 衰减)
-- **MH** 回测(移植 `quant-engine`)
+- **MG** 信号研究 ✅ — `signals` / `signal_runs` + 因子注册表(fundamental + price)+ IC/分位/衰减 + `qr signal research/factors/list/runs/show`
+- **MH** 回测 ✅ — quant-engine 整包移植 + `WarehouseDataFeed` + 6 内置策略 + `--strategy-file` + `qr backtest run/list/show`
+
+后续候选(v1 之外):EPV/DDM 估值模型、反向 DCF、多标的回测(需修上游 bar 对齐)、风险/止损模块接入 CLI、MCP 薄适配层。
 
 ## 开发
 
@@ -357,7 +435,7 @@ CI 在 push / PR 自动跑 ruff + pytest(`.github/workflows/ci.yml`)。
 
 ### 添加新表 / 改 schema
 
-D11:**不用 Alembic**。新表 → 加 `models/X.py` → 在 `models/__init__.py` re-export → `qr db init` 落地。**改/删既有列需在 Supabase dashboard 手工 ALTER**(`create_all(checkfirst=True)` 只加不改)。
+D11:**不用 Alembic**。新表 → 加 `models/X.py` → 在 `models/__init__.py` re-export → `qr db init` 落地。**改/删既有列需在 Neon console(SQL Editor)手工 ALTER**(`create_all(checkfirst=True)` 只加不改)。
 
 ### 添加新 scope / 新 endpoint
 

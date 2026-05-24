@@ -1459,8 +1459,8 @@ def _mask_dsn(dsn: str) -> str:
 
 @db_app.command("ping")
 def db_ping() -> None:
-    """`SELECT 1` round-trip + latency. Useful as a managed-Postgres keepalive
-    (Neon scale-to-zero / Supabase free-tier pause)."""
+    """`SELECT 1` round-trip + latency. Useful as a managed-Postgres connectivity
+    check / Neon scale-to-zero wakeup."""
     # Import lazily so `--help` doesn't require QR_DATABASE_URL to be set.
     from quant_researcher.db import engine
 
@@ -1513,11 +1513,11 @@ def db_status() -> None:
 
 @db_app.command("init")
 def db_init() -> None:
-    """Create any tables defined in SQLAlchemy models that don't yet exist in Supabase.
+    """Create any tables defined in SQLAlchemy models that don't yet exist in the database.
 
     Idempotent: uses `Base.metadata.create_all(checkfirst=True)`. Does NOT alter
-    existing tables — for column/type changes, edit them via the Supabase
-    dashboard or hand-written SQL (D11: no Alembic).
+    existing tables — for column/type changes, edit them via the Neon console
+    or hand-written SQL (D11: no Alembic).
     """
     from sqlalchemy import inspect
 

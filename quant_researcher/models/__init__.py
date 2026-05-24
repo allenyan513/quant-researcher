@@ -8,8 +8,9 @@ column changes are picked up by re-running `qr db init`.
 MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 `income_statement`, `balance_sheet`, `cash_flow`, `financial_ratios`,
 `analyst_estimates`. MB: `screens`, `screen_runs`. MC: `valuation_snapshots`.
-ME: `holdings`. MD: `news_items`, `research_bundles`. MF: `decisions`,
-`decision_tracking`. MH: `backtest_runs`. MG: `signals`, `signal_runs`.
+ME: `holdings`, `morning_call_snapshots`. MD: `news_items`,
+`research_bundles`. MF: `decisions`, `decision_tracking`. MH:
+`backtest_runs`. MG: `signals`, `signal_runs`.
 """
 
 from __future__ import annotations

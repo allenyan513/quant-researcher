@@ -194,7 +194,7 @@ from quant_researcher import models  # noqa: E402, F401
 
 **qr 专属编排在 `quant_researcher/backtest/`**(不污染 engine 包,re-sync 友好):
 - `engine/data/warehouse_feed.py` — `WarehouseDataFeed(DataFeed).fetch()` 读 `daily_prices` → `Bar`。**默认 `adjusted=True`**:用 `factor = adj_close/close` 把整根 OHLC 回调(split/dividend 正确),`close = adj_close`;`adj_close` 缺失 → factor=1;无 close 的行跳过。`--raw` 关掉。这是放在 engine/data/ 的唯一 qr 专属文件(additive,不与上游冲突)。
-- `backtest/strategies/` — 内置策略注册表(`REGISTRY` dict,v1 只有 `sma_crossover`)。加内置策略:丢个 module + 在 `REGISTRY` 注册(keys 也驱动 CLI 错误里的 "valid:" 列表)。
+- `backtest/strategies/` — 内置策略注册表(`REGISTRY` dict,v1 有 6 个单标的:`sma_crossover` / `buy_and_hold` / `macd_crossover` / `bollinger_reversion` / `rsi_reversion` / `donchian_breakout`)。加内置策略:丢个 module + 在 `REGISTRY` 注册(keys 也驱动 CLI 错误里的 "valid:" 列表)。
 - `backtest/loader.py` — `--strategy-file` 用 importlib 加载外部 `.py` 里的 `BaseStrategy` 子类(**本地执行,不沙箱** —— 跟本地跑任意脚本同信任级别)。
 - `backtest/runner.py` — `run_backtest(...)` 唯一入口(CLI + Python 都走它)。解析策略(file 优先于 registry name)→ 单 symbol 策略自动注入 `symbols[0]` → 跑 `BacktestEngine(verbose=False)` → `calculate_metrics` → 写一行 `backtest_runs` → 返回 envelope-friendly summary(**不含** equity_curve/trade_log 大字段,那俩进 DB 由 `qr backtest show` 取)。
 - **JSON 序列化两个坑**(都在 runner 处理):`calculate_metrics` 出 **numpy 标量** → `_to_jsonable` 转原生;`profit_factor` 等可能是 **inf/nan** → 转 None(Postgres JSONB 拒绝 Infinity)。新增写进 `backtest_runs` JSON 列的字段都要过 `_to_jsonable`/`_num`。
@@ -202,7 +202,7 @@ from quant_researcher import models  # noqa: E402, F401
 **依赖**:移植引入 `scipy`(metrics 的 PSR/skew/kurtosis)。**测试**:`tests/engine/` 是上游测试整包移植(235 个,验证移植正确性,改 import 即可);qr 专属在 `tests/test_warehouse_feed.py` / `test_backtest_runner.py` / `test_backtest_cli.py`。
 
 **已知限制(upstream,v1 不碰、暂不修)** —— PR #6 review 标出,因偏离 upstream 风险大且 v1 用不到而**故意延后**(真要修先在 quant-engine 上游改再 sync):
-- **多标的 bar 错位 → 前视偏差**(`engine.py` 事件循环):循环按 `range(max_bars)` 对每个 symbol 各自 `advance()`,**假设所有标的 bar 完全对齐**。若某标的有缺口(停牌/上市晚),它的 bar 会相对其他标的"左移",同一 `on_bar` 里看到不同日期的价格。v1 只有单标的 `sma_crossover`,且 warehouse 是美股共享交易日历(同期标的天然对齐),不触发;**多标的策略(走 `--strategy-file`)要自己保证标的历史齐全**。正解是按"全标的去重排序时间轴"迭代。
+- **多标的 bar 错位 → 前视偏差**(`engine.py` 事件循环):循环按 `range(max_bars)` 对每个 symbol 各自 `advance()`,**假设所有标的 bar 完全对齐**。若某标的有缺口(停牌/上市晚),它的 bar 会相对其他标的"左移",同一 `on_bar` 里看到不同日期的价格。v1 内置策略全是单标的(如 `sma_crossover`),且 warehouse 是美股共享交易日历(同期标的天然对齐),不触发;**多标的策略(走 `--strategy-file`)要自己保证标的历史齐全**。正解是按"全标的去重排序时间轴"迭代。
 - **STOP_LIMIT 触发态不持久**(`broker.py` `_fill_stop_limit`):stop 触发后若当根 bar limit 没成交,只 return None 而**没转成 LIMIT 单**,下根 bar 重新判 trigger —— 价格回到 stop 另一侧会"un-trigger"。v1 只用市价单(`buy`/`sell`),不碰;用 `set_stop_loss` 等止损的自定义策略要注意。正解是触发后把 order 状态置为已触发并转 LIMIT。
 
 ### 14. `qr morningcall` — 组合晨报(features §E)
@@ -276,13 +276,13 @@ config/watchlist.txt   .gitignored(用户机器上自填);.sample 是模板
 5. **关键设计决策**在 docstring + 测试名里写清楚(参考 MA-3 `test_refresh_financials_known_at_equals_accepted_date`)。
 6. **commit message** 用 `<milestone>: <一句话>`,body 列改动 + 测试数 + 设计决策。结尾固定 `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`。
 7. **push + `gh pr create`**,PR body 用 MA-2/MA-3 PR 的格式(Summary / 设计决策 / Test plan / Out of scope)。
-8. **用户跑 e2e**(真实 FMP + Supabase),通过后 merge。
+8. **用户跑 e2e**(真实 FMP + Neon),通过后 merge。
 
 ## Schema 演进(D11:无 Alembic)
 
 - **加新表**:`models/X.py` + `models/__init__.py` re-export → `qr db init` 自动落地。
-- **加新列(可空)**:改 model → `qr db init` **不会**自动 ALTER 既有表。需要在 Supabase SQL Editor 手工 `ALTER TABLE X ADD COLUMN ...`。例:`financial_ratios` 的 `return_on_invested_capital` / `earnings_yield` 就是这么加的(`ALTER TABLE financial_ratios ADD COLUMN return_on_invested_capital double precision; ADD COLUMN earnings_yield double precision;`),加完 `qr data refresh --scope ratios --force` 回填。
-- **改 / 删列**:Supabase dashboard 手工 SQL,顺序:先改 model + 跑测试 → 再 ALTER 生产库 → 部署。
+- **加新列(可空)**:改 model → `qr db init` **不会**自动 ALTER 既有表。需要在 Neon console 的 SQL Editor 手工 `ALTER TABLE X ADD COLUMN ...`。例:`financial_ratios` 的 `return_on_invested_capital` / `earnings_yield` 就是这么加的(`ALTER TABLE financial_ratios ADD COLUMN return_on_invested_capital double precision; ADD COLUMN earnings_yield double precision;`),加完 `qr data refresh --scope ratios --force` 回填。
+- **改 / 删列**:Neon console 手工 SQL,顺序:先改 model + 跑测试 → 再 ALTER 生产库 → 部署。
 
 ## 常见坑
 
