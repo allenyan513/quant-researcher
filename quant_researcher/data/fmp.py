@@ -11,7 +11,8 @@ Thin httpx wrapper with two non-functional concerns built in:
 
 Public surface (MA-2):
     `get_profile(symbol)` → single dict (or None on empty response)
-    `get_historical_prices(symbol, since=None)` → list of OHLCV dicts
+    `get_historical_prices(symbol, since=None)` → list of raw OHLCV dicts
+    `get_adjusted_prices(symbol, since=None)` → list of split/div-adjusted dicts
 
 The client owns no business logic — callers map FMP payloads onto SQLAlchemy
 rows in `quant_researcher.data.refresh`.
@@ -77,27 +78,58 @@ class FMPClient:
     def get_historical_prices(
         self, symbol: str, *, since: date | None = None
     ) -> list[dict[str, Any]]:
-        """Return OHLCV rows from `/historical-price-eod/full`.
+        """Return raw OHLCV rows from `/historical-price-eod/full`.
 
         `since` (inclusive) trims the request range; otherwise FMP returns
         the full history it has. Result is the raw list FMP gives us
         (newest-first); callers map → `DailyPrice` rows.
+
+        `/full` carries NO `adjClose` — pair with `get_adjusted_prices` (joined
+        by date in `refresh_quotes`) for split/dividend-adjusted closes.
         """
+        return self._get_price_history("/historical-price-eod/full", symbol, since)
+
+    def get_adjusted_prices(
+        self, symbol: str, *, since: date | None = None
+    ) -> list[dict[str, Any]]:
+        """Return split/dividend-adjusted rows from `/historical-price-eod/dividend-adjusted`.
+
+        Each row carries `date`, `adjOpen` / `adjHigh` / `adjLow` / `adjClose`,
+        and `volume` — but NO raw `close`. `refresh_quotes` joins each `adjClose`
+        onto the matching `/full` bar by date so `daily_prices.adj_close` is
+        populated. Field names verified against FMP /stable 2026-05-23.
+
+        Returns `[]` on HTTP 402 (premium-gated on lighter plans), matching
+        `get_news` / `get_earnings_transcript`. This keeps `refresh_quotes`
+        ingesting the raw `/full` bars (with `adj_close=None`, the panel's
+        documented fallback) instead of a plan gate on this enrichment endpoint
+        halting ALL quote ingestion. Transient errors (429/5xx) still raise so
+        they retry next run.
+        """
+        try:
+            return self._get_price_history(
+                "/historical-price-eod/dividend-adjusted", symbol, since
+            )
+        except FMPError as exc:
+            if exc.status_code == 402:
+                return []
+            raise
+
+    def _get_price_history(
+        self, path: str, symbol: str, since: date | None
+    ) -> list[dict[str, Any]]:
+        """Shared shape for EOD price endpoints (full + dividend-adjusted)."""
         params: dict[str, Any] = {"symbol": symbol}
         if since is not None:
             params["from"] = since.isoformat()
-        payload = self._get("/historical-price-eod/full", params)
+        payload = self._get(path, params)
         # FMP sometimes wraps history under `{symbol, historical: [...]}` and
         # sometimes returns the bare list — handle both.
         if isinstance(payload, dict):
-            rows = payload.get("historical") or []
-        elif isinstance(payload, list):
-            rows = payload
-        else:
-            raise FMPError(
-                f"historical-price-eod/full: unexpected payload type {type(payload).__name__}"
-            )
-        return rows
+            return payload.get("historical") or []
+        if isinstance(payload, list):
+            return payload
+        raise FMPError(f"{path}: unexpected payload type {type(payload).__name__}")
 
     def get_income_statement(
         self, symbol: str, *, period: str = "quarter", limit: int | None = None

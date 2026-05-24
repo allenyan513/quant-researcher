@@ -77,6 +77,48 @@ def test_historical_prices_passes_since_as_from_param(client: FMPClient) -> None
     assert route.calls.last.request.url.params.get("from") == "2024-06-01"
 
 
+# ----- adjusted prices ------------------------------------------------------
+
+
+@respx.mock
+def test_adjusted_prices_hits_dividend_adjusted_path(client: FMPClient) -> None:
+    payload = [{"date": "2024-06-05", "adjClose": 194.19, "volume": 100}]
+    route = respx.get(f"{BASE}/historical-price-eod/dividend-adjusted").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    assert client.get_adjusted_prices("AAPL") == payload
+    assert route.called
+
+
+@respx.mock
+def test_adjusted_prices_passes_since_as_from_param(client: FMPClient) -> None:
+    route = respx.get(f"{BASE}/historical-price-eod/dividend-adjusted").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    client.get_adjusted_prices("AAPL", since=date(2024, 6, 1))
+    assert route.calls.last.request.url.params.get("from") == "2024-06-01"
+
+
+@respx.mock
+def test_adjusted_prices_returns_empty_on_402(client: FMPClient) -> None:
+    # Premium-gated on lighter plans: soft-fail so refresh still ingests raw
+    # bars with adj_close=None instead of halting all quote ingestion.
+    respx.get(f"{BASE}/historical-price-eod/dividend-adjusted").mock(
+        return_value=httpx.Response(402, text="Premium endpoint")
+    )
+    assert client.get_adjusted_prices("AAPL") == []
+
+
+@respx.mock
+def test_adjusted_prices_raises_on_non_402(client: FMPClient) -> None:
+    # Only 402 soft-fails; other errors propagate so they retry next run.
+    respx.get(f"{BASE}/historical-price-eod/dividend-adjusted").mock(
+        return_value=httpx.Response(500, text="server error")
+    )
+    with pytest.raises(FMPError):
+        client.get_adjusted_prices("AAPL")
+
+
 # ----- retry / error handling ----------------------------------------------
 
 

@@ -126,6 +126,26 @@ def refresh_quotes(
 ) -> RefreshResult:
     """Append-only refresh of `daily_prices` per symbol.
 
+    Fetches raw OHLCV from `/historical-price-eod/full` AND the split/dividend-
+    adjusted stream from `/historical-price-eod/dividend-adjusted`, joining each
+    `adjClose` onto its bar by date so `adj_close` is populated (`/full` omits
+    it). Both calls share the `try`: a TRANSIENT adjusted-endpoint error
+    (429/5xx) fails the symbol — it self-heals next run, since `since` restarts
+    at the last STORED date — rather than silently storing unadjusted prices. A
+    402 instead soft-fails inside `get_adjusted_prices` → `[]`, so raw bars still
+    ingest with `adj_close=None` (panel fallback) rather than a plan gate halting
+    ALL quote ingestion.
+
+    Ingest is append-only (dedup on existing `trade_date`): this only sets
+    `adj_close` on NEW bars and never revises existing rows. Two consequences:
+    (1) a split/dividend re-scales FMP's WHOLE adjusted series, but old rows keep
+    their prior `adj_close` → they go STALE; (2) if `/full` publishes a bar
+    before `/dividend-adjusted` does, that bar is stored with `adj_close=None`
+    and never corrected. `--force` repairs neither (it re-fetches only the
+    incremental window; dedup skips stored dates). To repair existing rows,
+    re-run `scripts/backfill_adj_close.py` (idempotent, updates in place) — e.g.
+    after a corporate action.
+
     `only_stale=True` (default since MA-4) narrows `symbols` via
     `stale_symbols("quote", ...)` before any FMP call.
     """
@@ -147,21 +167,46 @@ def refresh_quotes(
                 else today - timedelta(days=lookback_days)
             )
             rows = client.get_historical_prices(sym, since=since)
+            adj_rows = client.get_adjusted_prices(sym, since=since)
         except FMPError as exc:
             outcomes.append(SymbolOutcome(sym, ok=False, error=str(exc)))
             continue
-        outcomes.append(_insert_prices(session, sym, rows))
+        outcomes.append(
+            _insert_prices(session, sym, rows, _adj_close_by_date(adj_rows))
+        )
     return RefreshResult(scope="quote", outcomes=outcomes)
 
 
+def _adj_close_by_date(rows: list[dict[str, Any]]) -> dict[date, float]:
+    """Index `/dividend-adjusted` rows' `adjClose` by trade_date for the join.
+
+    Requested over the same date range as `/full`, so `trade_date` alone is a
+    safe key. Rows missing a date or adjClose are dropped.
+    """
+    out: dict[date, float] = {}
+    for r in rows:
+        d = _as_date(r.get("date"))
+        adj = _as_float(r.get("adjClose"))
+        if d is not None and adj is not None:
+            out[d] = adj
+    return out
+
+
 def _insert_prices(
-    session: Session, symbol: str, rows: list[dict[str, Any]]
+    session: Session,
+    symbol: str,
+    rows: list[dict[str, Any]],
+    adj_by_date: dict[date, float],
 ) -> SymbolOutcome:
     parsed: list[dict[str, Any]] = []
     for r in rows:
         mapped = _price_from_fmp(symbol, r)
         if mapped["trade_date"] is None:
             continue
+        # `/full` has no adjClose; fill from the dividend-adjusted stream. A
+        # non-null value from `/full` (defensive) still wins.
+        if mapped["adj_close"] is None:
+            mapped["adj_close"] = adj_by_date.get(mapped["trade_date"])
         parsed.append(mapped)
     if not parsed:
         return SymbolOutcome(symbol, ok=True, upserted=0)
