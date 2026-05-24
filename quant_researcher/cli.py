@@ -157,9 +157,7 @@ def holdings_sync(
                 data={
                     "source": "flex",
                     "account_id": result.account_id,
-                    "as_of_date": (
-                        result.as_of_date.isoformat() if result.as_of_date else None
-                    ),
+                    "as_of_date": _iso(result.as_of_date),
                     "imported": result.imported,
                     "symbols": result.symbols,
                     "skipped": result.skipped,
@@ -228,8 +226,6 @@ def holdings_import_csv(
                 account_id_override=account_override,
                 as_of_date_override=as_of_date,
             )
-    except ValueError as exc:
-        _emit(Envelope.failure("holdings_import_failed", str(exc)))
     except Exception as exc:
         _emit(Envelope.failure("holdings_import_failed", str(exc)))
     else:
@@ -239,9 +235,7 @@ def holdings_import_csv(
                     "source": "csv",
                     "file": str(file),
                     "account_id": result.account_id,
-                    "as_of_date": (
-                        result.as_of_date.isoformat() if result.as_of_date else None
-                    ),
+                    "as_of_date": _iso(result.as_of_date),
                     "imported": result.imported,
                     "symbols": result.symbols,
                     "skipped": result.skipped,
@@ -372,7 +366,7 @@ def _holding_to_dict(h: Any) -> dict[str, Any]:
     return {
         "account_id": h.account_id,
         "symbol": h.symbol,
-        "as_of_date": h.as_of_date.isoformat() if h.as_of_date else None,
+        "as_of_date": _iso(h.as_of_date),
         "asset_category": h.asset_category,
         "sub_category": h.sub_category,
         "quantity": h.quantity,
@@ -460,7 +454,7 @@ def research_news_cmd(
                 "missing_fmp_api_key", "FMP_API_KEY is not set in .env."
             )
         )
-    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    syms = _parse_symbols(symbols)
     if not syms:
         _emit(Envelope.failure("no_symbols", "--symbols cannot be empty."))
 
@@ -513,8 +507,8 @@ def research_list(
                 {
                     "bundle_id": r.bundle_id,
                     "symbol": r.symbol,
-                    "as_of": r.as_of.isoformat() if r.as_of else None,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "as_of": _iso(r.as_of),
+                    "created_at": _iso(r.created_at),
                     "code_version": r.code_version,
                 }
                 for r in rows
@@ -555,8 +549,8 @@ def research_show(
                 data={
                     "bundle_id": row.bundle_id,
                     "symbol": row.symbol,
-                    "as_of": row.as_of.isoformat() if row.as_of else None,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "as_of": _iso(row.as_of),
+                    "created_at": _iso(row.created_at),
                     "code_version": row.code_version,
                     "payload": row.payload,
                 },
@@ -732,7 +726,7 @@ def ledger_list(
                     "decision_id": d.decision_id,
                     "symbol": d.symbol,
                     "side": d.side,
-                    "opened_at": d.opened_at.isoformat() if d.opened_at else None,
+                    "opened_at": _iso(d.opened_at),
                     "price_at_open": d.price_at_open,
                     "confidence": d.confidence,
                     "tags": d.tags,
@@ -835,7 +829,7 @@ def ledger_show(
                     "tracking": [
                         {
                             "horizon": t.horizon,
-                            "tracked_at": t.tracked_at.isoformat() if t.tracked_at else None,
+                            "tracked_at": _iso(t.tracked_at),
                             "price": t.price,
                             "return_pct": t.return_pct,
                             "spy_return_pct": t.spy_return_pct,
@@ -951,7 +945,7 @@ def backtest_run(
                 "missing_strategy", "provide --strategy or --strategy-file"
             )
         )
-    target_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    target_list = _parse_symbols(symbols)
     if not target_list:
         _emit(Envelope.failure("missing_symbols", "--symbols is empty"))
     for label, value in (("--start", start), ("--end", end)):
@@ -1030,13 +1024,13 @@ def backtest_list(
                     "run_id": r.run_id,
                     "strategy": r.strategy,
                     "symbols": r.symbols,
-                    "start": r.start.isoformat() if r.start else None,
-                    "end": r.end.isoformat() if r.end else None,
+                    "start": _iso(r.start),
+                    "end": _iso(r.end),
                     "benchmark_symbol": r.benchmark_symbol,
                     "total_return": (r.metrics or {}).get("total_return"),
                     "sharpe_ratio": (r.metrics or {}).get("sharpe_ratio"),
                     "max_drawdown": (r.metrics or {}).get("max_drawdown"),
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "created_at": _iso(r.created_at),
                 }
                 for r in rows
             ]
@@ -1068,8 +1062,8 @@ def backtest_show(
                     "run_id": r.run_id,
                     "strategy": r.strategy,
                     "symbols": r.symbols,
-                    "start": r.start.isoformat() if r.start else None,
-                    "end": r.end.isoformat() if r.end else None,
+                    "start": _iso(r.start),
+                    "end": _iso(r.end),
                     "initial_cash": r.initial_cash,
                     "benchmark_symbol": r.benchmark_symbol,
                     "params": r.params,
@@ -1078,7 +1072,7 @@ def backtest_show(
                     "equity_curve": r.equity_curve,
                     "trade_log": r.trade_log,
                     "code_version": r.code_version,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "created_at": _iso(r.created_at),
                 }
     except Exception as exc:
         _emit(Envelope.failure("backtest_show_failed", str(exc)))
@@ -1259,7 +1253,7 @@ def signal_research(
         _emit(Envelope.failure("invalid_quantiles", "--quantiles must be >= 2"))
     if rebalance not in ("monthly", "weekly"):
         _emit(Envelope.failure("invalid_rebalance", "--rebalance must be monthly|weekly"))
-    target = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    target = _parse_symbols(symbols) if symbols else None
 
     try:
         with session_factory()() as sess, sess.begin():
@@ -1275,8 +1269,6 @@ def signal_research(
             )
     except FactorError as exc:
         _emit(Envelope.failure("invalid_factor", str(exc)))
-    except ValueError as exc:
-        _emit(Envelope.failure("signal_research_failed", str(exc)))
     except Exception as exc:
         _emit(Envelope.failure("signal_research_failed", str(exc)))
     else:
@@ -1332,7 +1324,7 @@ def signal_list() -> None:
                     "factor": s.factor,
                     "params": s.params,
                     "description": s.description,
-                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                    "created_at": _iso(s.created_at),
                 }
                 for s in rows
             ]
@@ -1376,7 +1368,7 @@ def signal_runs(
                     "horizon": (r.params or {}).get("horizon"),
                     "mean_ic": (r.ic_summary or {}).get("mean_ic"),
                     "n_dates": (r.ic_summary or {}).get("n_dates"),
-                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                    "ran_at": _iso(r.ran_at),
                 }
                 for r in rows
             ]
@@ -1416,7 +1408,7 @@ def signal_show(
                     "coverage": r.coverage,
                     "universe_size": r.universe_size,
                     "code_version": r.code_version,
-                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                    "ran_at": _iso(r.ran_at),
                 }
     except Exception as exc:
         _emit(Envelope.failure("signal_show_failed", str(exc)))
@@ -1429,6 +1421,20 @@ def signal_show(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_symbols(raw: str) -> list[str]:
+    """Split a comma-separated symbol string into upper-cased, blank-free tickers.
+
+    `" aapl, msft ,, "` → `["AAPL", "MSFT"]`. Does NOT de-duplicate (callers
+    rely on positional order and the warehouse keys on symbol anyway).
+    """
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+def _iso(value: Any) -> str | None:
+    """ISO-8601 string for a date/datetime, or None when it's missing/falsy."""
+    return value.isoformat() if value else None
 
 
 def _emit(env: Envelope) -> None:
@@ -1721,7 +1727,7 @@ def data_refresh(
     # the `_emit`-inside-try double-envelope trap.
     with session_factory()() as sess:
         if symbols:
-            targets = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            targets = _parse_symbols(symbols)
         else:
             targets = sorted(sess.scalars(select(UniverseMember.symbol)))
     if not targets:
@@ -1866,7 +1872,7 @@ def data_freshness(
 
     with session_factory()() as sess:
         if symbols:
-            targets = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+            targets = _parse_symbols(symbols)
         else:
             targets = sorted(sess.scalars(select(UniverseMember.symbol)))
     if not targets:
@@ -1967,9 +1973,7 @@ def screen_run(
             )
         )
 
-    target_list = (
-        [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
-    )
+    target_list = _parse_symbols(symbols) if symbols else None
 
     try:
         with session_factory()() as sess, sess.begin():
@@ -1983,8 +1987,6 @@ def screen_run(
             )
     except (ExpressionError, TechnicalError) as exc:
         _emit(Envelope.failure("invalid_screen_spec", str(exc)))
-    except ValueError as exc:
-        _emit(Envelope.failure("screen_run_failed", str(exc)))
     except Exception as exc:
         _emit(Envelope.failure("screen_run_failed", str(exc)))
     else:
@@ -2022,7 +2024,7 @@ def screen_list() -> None:
                     "expr": s.expr,
                     "technical": s.technical,
                     "description": s.description,
-                    "created_at": s.created_at.isoformat() if s.created_at else None,
+                    "created_at": _iso(s.created_at),
                 }
                 for s in rows
             ]
@@ -2064,7 +2066,7 @@ def screen_runs(
                     "screen_name": r.screen_name,
                     "expr": r.expr,
                     "technical": r.technical,
-                    "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                    "ran_at": _iso(r.ran_at),
                     "universe_size": r.universe_size,
                     "matched": len(r.result_symbols or []),
                     "expr_hash": r.expr_hash,
@@ -2094,8 +2096,6 @@ def screen_diff(
     try:
         with session_factory()() as sess:
             diff = diff_runs(sess, from_run, to_run)
-    except ValueError as exc:
-        _emit(Envelope.failure("screen_diff_failed", str(exc)))
     except Exception as exc:
         _emit(Envelope.failure("screen_diff_failed", str(exc)))
     else:
@@ -2202,8 +2202,6 @@ def value_company_cmd(
                 model=model,
                 assumptions=parsed_assumptions,
             )
-    except ValueError as exc:
-        _emit(Envelope.failure("valuation_failed", str(exc)))
     except Exception as exc:
         _emit(Envelope.failure("valuation_failed", str(exc)))
     else:
