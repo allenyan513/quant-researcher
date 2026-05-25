@@ -20,6 +20,7 @@ from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 
 
@@ -208,6 +209,33 @@ def test_insider_stale_when_filing_past_30d(session: Session) -> None:
 def test_insider_missing_when_no_row(session: Session) -> None:
     report = check_freshness(session, ["AAPL"], scopes=("insider",), now=NOW)
     assert report.scopes["insider"].missing == ["AAPL"]
+
+
+# ----- short-interest threshold (judged on settlement_date, 25d) -----------
+
+
+def test_short_fresh_when_settlement_within_25d(session: Session) -> None:
+    session.add(
+        ShortInterest(symbol="AAPL", settlement_date=NOW.date() - timedelta(days=10))
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("short",), now=NOW)
+    assert report.scopes["short"].fresh == ["AAPL"]
+    assert report.scopes["short"].threshold_days == 25
+
+
+def test_short_stale_when_settlement_past_25d(session: Session) -> None:
+    session.add(
+        ShortInterest(symbol="AAPL", settlement_date=NOW.date() - timedelta(days=30))
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("short",), now=NOW)
+    assert report.scopes["short"].stale == ["AAPL"]
+
+
+def test_short_missing_when_no_row(session: Session) -> None:
+    report = check_freshness(session, ["AAPL"], scopes=("short",), now=NOW)
+    assert report.scopes["short"].missing == ["AAPL"]
 
 
 # ----- stale_symbols helper ------------------------------------------------

@@ -18,6 +18,7 @@ from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.models.research import NewsItem, ResearchBundle
+from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research.bundler import build_bundle, bundle
@@ -341,6 +342,27 @@ def test_bundle_insider_none_when_missing(session: Session) -> None:
     _seed_full_robust(session, "AAPL")  # no insider rows
     p = build_bundle(session, "AAPL")
     assert p["insider"] is None
+
+
+def test_bundle_short_interest_section(session: Session) -> None:
+    _seed_full_robust(session, "AAPL")
+    session.add(
+        ShortInterest(
+            symbol="AAPL", settlement_date=date(2026, 4, 30), short_interest=12e6,
+            previous_short_interest=10e6, change_pct=20.0, avg_daily_volume=5e6,
+            days_to_cover=2.4,
+        )
+    )
+    session.commit()
+    si = build_bundle(session, "AAPL")["short_interest"]
+    assert si["settlement_date"] == "2026-04-30"
+    assert si["short_interest"] == 12e6
+    assert si["days_to_cover"] == 2.4
+
+
+def test_bundle_short_interest_none_when_missing(session: Session) -> None:
+    _seed_full_robust(session, "AAPL")
+    assert build_bundle(session, "AAPL")["short_interest"] is None
 
 
 def _seed_two_years(session: Session, sym: str = "MSFT") -> None:

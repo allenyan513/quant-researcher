@@ -1802,7 +1802,8 @@ def universe_list(
 
 
 _VALID_SCOPES = (
-    "profile", "quote", "financials", "ratios", "estimates", "transcript", "insider", "all"
+    "profile", "quote", "financials", "ratios", "estimates",
+    "transcript", "insider", "short", "all",
 )
 
 
@@ -1858,7 +1859,10 @@ def data_refresh(
     `--scope insider`: persist recent SEC Form 4 insider transactions per symbol
     from **free SEC EDGAR** (via edgartools; needs `SEC_EDGAR_IDENTITY`). Also NOT
     in `--scope all` (per-name, network-heavy) — run targeted with `--symbols`.
-    `--scope all`: runs every scope above EXCEPT transcript and insider.
+    `--scope short`: persist the latest **FINRA short interest** (free, auth-free
+    bi-monthly CSV; no key). One download serves all requested symbols. Also NOT
+    in `--scope all`.
+    `--scope all`: runs every scope above EXCEPT transcript / insider / short.
 
     **MA-4 breaking change**: default is now only-stale. Each scope's
     response includes `skipped_fresh: [...]` listing symbols that already
@@ -1869,6 +1873,7 @@ def data_refresh(
 
     from quant_researcher.data.alphavantage import AlphaVantageClient
     from quant_researcher.data.edgar import EdgarClient
+    from quant_researcher.data.finra import FinraClient
     from quant_researcher.data.fmp import FMPClient
     from quant_researcher.data.freshness import stale_symbols
     from quant_researcher.data.refresh import (
@@ -1878,6 +1883,7 @@ def data_refresh(
         refresh_profile,
         refresh_quotes,
         refresh_ratios,
+        refresh_short_interest,
         refresh_transcript,
     )
     from quant_researcher.db import session_factory
@@ -1909,6 +1915,8 @@ def data_refresh(
                     "'Your Name you@example.com' — SEC requires a User-Agent).",
                 )
             )
+    elif scope == "short":
+        pass  # FINRA short interest is auth-free — no credential needed
     elif not cfg.fmp_api_key:
         _emit(
             Envelope.failure(
@@ -1975,6 +1983,23 @@ def data_refresh(
                 effective, skipped = _resolve(sess, "insider")
                 r = refresh_insider(sess, edgar_client, effective, only_stale=False)
                 scopes_out["insider"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
+                }
+        elif scope == "short":
+            # FINRA short interest — free, auth-free; one CSV serves all symbols.
+            # Also excluded from `--scope all`.
+            with (
+                session_factory()() as sess,
+                sess.begin(),
+                FinraClient() as client,
+            ):
+                effective, skipped = _resolve(sess, "short")
+                r = refresh_short_interest(sess, client, effective, only_stale=False)
+                scopes_out["short"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,

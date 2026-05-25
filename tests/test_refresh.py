@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
 from quant_researcher.data.edgar import EdgarClient, EdgarError
+from quant_researcher.data.finra import FinraClient, FinraError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.refresh import (
     _as_datetime,
@@ -20,6 +21,7 @@ from quant_researcher.data.refresh import (
     refresh_profile,
     refresh_quotes,
     refresh_ratios,
+    refresh_short_interest,
     refresh_transcript,
 )
 from quant_researcher.db import Base
@@ -29,6 +31,7 @@ from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 
 
@@ -57,6 +60,11 @@ def av() -> MagicMock:
 @pytest.fixture
 def edgar() -> MagicMock:
     return MagicMock(spec=EdgarClient)
+
+
+@pytest.fixture
+def finra() -> MagicMock:
+    return MagicMock(spec=FinraClient)
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -1140,4 +1148,60 @@ def test_refresh_insider_only_stale_skips_fresh(
 
     result = refresh_insider(session, edgar, ["NVDA"])  # default only_stale=True
     edgar.get_insider_transactions.assert_not_called()
+    assert result.outcomes == []
+
+
+# ----- short interest (FINRA) ----------------------------------------------
+
+
+def _si_rows(settlement: date = date(2026, 4, 30)) -> dict:
+    return {
+        "TSLA": {"settlement_date": settlement, "short_interest": 12e6,
+                 "previous_short_interest": 10e6, "change_pct": 20.0,
+                 "avg_daily_volume": 5e6, "days_to_cover": 2.4, "security_name": "TESLA INC"},
+        "NVDA": {"settlement_date": settlement, "short_interest": 8e6,
+                 "previous_short_interest": 9e6, "change_pct": -11.1,
+                 "avg_daily_volume": 40e6, "days_to_cover": 0.2, "security_name": "NVIDIA CORP"},
+    }
+
+
+def test_refresh_short_inserts(session: Session, finra: MagicMock) -> None:
+    finra.get_short_interest.return_value = _si_rows()
+    result = refresh_short_interest(session, finra, ["TSLA", "NVDA"], only_stale=False)
+    session.commit()
+
+    assert result.total_upserted == 2
+    r = session.get(ShortInterest, ("TSLA", date(2026, 4, 30)))
+    assert r is not None
+    assert r.short_interest == 12e6
+    assert r.days_to_cover == 2.4
+    assert r.known_at is not None
+
+
+def test_refresh_short_absent_symbol_soft_skips(session: Session, finra: MagicMock) -> None:
+    finra.get_short_interest.return_value = {"TSLA": _si_rows()["TSLA"]}  # NVDA absent
+    result = refresh_short_interest(session, finra, ["TSLA", "NVDA"], only_stale=False)
+    session.commit()
+
+    assert result.total_upserted == 1
+    assert result.total_skipped == 1
+    assert session.get(ShortInterest, ("NVDA", date(2026, 4, 30))) is None
+
+
+def test_refresh_short_download_failure_fails_all(session: Session, finra: MagicMock) -> None:
+    finra.get_short_interest.side_effect = FinraError("boom")
+    result = refresh_short_interest(session, finra, ["TSLA", "NVDA"], only_stale=False)
+
+    assert result.total_upserted == 0
+    assert [f["symbol"] for f in result.failed] == ["TSLA", "NVDA"]
+
+
+def test_refresh_short_only_stale_skips_fresh(session: Session, finra: MagicMock) -> None:
+    session.add(
+        ShortInterest(symbol="TSLA", settlement_date=date.today() - timedelta(days=5))
+    )
+    session.commit()
+
+    result = refresh_short_interest(session, finra, ["TSLA"])  # default only_stale=True
+    finra.get_short_interest.assert_not_called()
     assert result.outcomes == []

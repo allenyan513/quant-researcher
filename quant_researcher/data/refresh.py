@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
 from quant_researcher.data.edgar import EdgarClient, EdgarError
+from quant_researcher.data.finra import FinraClient, FinraError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.freshness import stale_symbols
 from quant_researcher.models.estimates import AnalystEstimate
@@ -32,6 +33,7 @@ from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 
 
@@ -839,6 +841,58 @@ def _insider_from_row(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
         "price": row.get("price"),
         "value": row.get("value"),
         "remaining_shares": row.get("remaining_shares"),
+        "known_at": datetime.now(UTC),
+    }
+
+
+def refresh_short_interest(
+    session: Session,
+    client: FinraClient,
+    symbols: list[str],
+    *,
+    only_stale: bool = True,
+) -> RefreshResult:
+    """Persist the latest FINRA short interest for `symbols` (free; one download).
+
+    FINRA publishes one bi-monthly CSV covering all securities, so a single
+    download serves every requested symbol — `client.get_short_interest` returns
+    `{SYMBOL: row}` for the latest published file. UPSERT by PK
+    `(symbol, settlement_date)`. A symbol absent from the file (no short data) is
+    soft-skipped; a download/parse failure fails all requested symbols (the file
+    is shared) without raising out of the refresh.
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "short", symbols)
+    if not symbols:
+        return RefreshResult(scope="short", outcomes=[])
+    try:
+        data = client.get_short_interest(symbols)
+    except FinraError as exc:
+        return RefreshResult(
+            scope="short",
+            outcomes=[SymbolOutcome(s, ok=False, error=str(exc)) for s in symbols],
+        )
+    outcomes: list[SymbolOutcome] = []
+    for sym in symbols:
+        row = data.get(sym.upper())
+        if row is None:
+            outcomes.append(SymbolOutcome(sym, ok=True, skipped=1))
+            continue
+        session.merge(ShortInterest(**_short_from_row(sym, row)))
+        outcomes.append(SymbolOutcome(sym, ok=True, upserted=1))
+    return RefreshResult(scope="short", outcomes=outcomes)
+
+
+def _short_from_row(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": symbol.upper(),
+        "settlement_date": row["settlement_date"],
+        "short_interest": row.get("short_interest"),
+        "previous_short_interest": row.get("previous_short_interest"),
+        "change_pct": row.get("change_pct"),
+        "avg_daily_volume": row.get("avg_daily_volume"),
+        "days_to_cover": row.get("days_to_cover"),
+        "security_name": row.get("security_name"),
         "known_at": datetime.now(UTC),
     }
 

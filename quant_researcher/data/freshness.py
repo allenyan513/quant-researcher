@@ -34,6 +34,7 @@ from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 
 # --- Hardcoded thresholds (MA-4) -------------------------------------------
@@ -45,6 +46,8 @@ RATIOS_STALE_AFTER = timedelta(days=100)
 ESTIMATES_STALE_AFTER = timedelta(days=7)
 TRANSCRIPT_STALE_AFTER = timedelta(days=100)  # quarterly cadence, like financials
 INSIDER_STALE_AFTER = timedelta(days=30)  # Form 4s land sporadically; re-check monthly
+SHORT_INTEREST_STALE_AFTER = timedelta(days=25)  # bi-monthly + ~7bd publish lag
+#   (so the latest *available* settlement isn't false-flagged stale during the gap)
 
 SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "profile": PROFILE_STALE_AFTER,
@@ -54,6 +57,7 @@ SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "estimates": ESTIMATES_STALE_AFTER,
     "transcript": TRANSCRIPT_STALE_AFTER,
     "insider": INSIDER_STALE_AFTER,
+    "short": SHORT_INTEREST_STALE_AFTER,
 }
 
 
@@ -154,6 +158,13 @@ def _compute_scope(
         # Judge on the latest Form 4 filing date (the SEC filing event).
         latest = _latest_per_symbol(
             session, InsiderTransaction.symbol, InsiderTransaction.filing_date, symbols
+        )
+        cutoff_date = now.date() - threshold
+        fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)
+    elif scope == "short":
+        # Judge on the latest FINRA settlement date.
+        latest = _latest_per_symbol(
+            session, ShortInterest.symbol, ShortInterest.settlement_date, symbols
         )
         cutoff_date = now.date() - threshold
         fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)

@@ -19,6 +19,7 @@ single source of truth:
 | `estimates` | 7 days | `MAX(known_at)` |
 | `transcript` | 100 days | `MAX(call_date)` from `transcripts` — quarterly, judged on the call's own date (not `known_at`), like `financials` |
 | `insider` | 30 days | `MAX(filing_date)` from `insider_transactions` — Form 4s land sporadically; re-check monthly |
+| `short` | 25 days | `MAX(settlement_date)` from `short_interest` — FINRA bi-monthly + ~7bd publish lag (so the latest *available* settlement isn't false-flagged stale during the gap) |
 
 **`transcript` scope (Phase 3)**: source is **Alpha Vantage**, NOT FMP — FMP gates
 transcripts behind a premium tier (402), AV serves them on the free key. Its own
@@ -49,6 +50,18 @@ branch (no FMP/AV client; `EdgarClient` is not a context manager). Brand-new tab
 Note: 13F institutional ownership is deliberately deferred (it's an inverse lookup
 needing a CUSIP↔ticker map + 45-day lag — a separate project; edgartools is
 manager-centric).
+
+**`short` scope (Phase 5)**: source is **free, auth-free FINRA** (`data/finra.py`
+`FinraClient`, no key). FINRA publishes ONE bi-monthly CSV covering all securities
+at `cdn.finra.org/equity/otcmarket/biweekly/shrtYYYYMMDD.csv`; the client resolves
+the latest *published* file by probing recent settlement dates (15th + month-end,
+weekend-nudged) newest-first (absorbing the ~7bd lag), downloads it **once**, and
+returns rows for the requested symbols — so one download serves the whole batch.
+`refresh_short_interest` UPSERTs by PK `(symbol, settlement_date)`; a symbol absent
+from the file → soft-skip; a download/parse failure fails all requested symbols
+(shared file). Its own CLI branch (`FinraClient`, **no credential** — the only
+ownership scope needing no key). New table `short_interest` → `qr db init` (no
+ALTER). **Excluded from `--scope all`** (own client; bi-monthly cadence).
 
 The "is it stale" logic flows through only two functions: `check_freshness(session,
 symbols)` (for reports) and `stale_symbols(session, scope, symbols)` (for
