@@ -23,6 +23,10 @@ layers**: the deterministic core (facts the user owns, from `qr`) and the live
 context (today's fast-changing world, from web search). Keep them separate — web
 search adds context and narrative, it never overrides a `qr` number.
 
+> **Invocation:** `qr` is a project script (`pyproject.toml [project.scripts]`).
+> A bare `qr` is usually not on PATH — run it as **`uv run qr …`** from the repo
+> root. The examples below write `qr` for brevity.
+
 ## Step 1 — Deterministic core (`qr`)
 
 Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
