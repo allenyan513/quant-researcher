@@ -79,6 +79,65 @@ def test_build_morning_call_portfolio_aggregates(session: Session) -> None:
     assert aapl["decision"]["side"] == "buy"
 
 
+def test_day_pnl_attribution(session: Session) -> None:
+    _seed(session)
+    p = build_morning_call(session)["portfolio"]
+    # AAPL 100×(200−198)=+200 ; XOM 200×(100−102)=−400 → net −200
+    assert p["day_pnl"] == pytest.approx(-200.0)
+    # prior portfolio value 100×198 + 200×102 = 40200 → −200/40200
+    assert p["day_pnl_pct"] == pytest.approx(-0.4975, abs=0.01)
+    assert p["top_contributors"][0]["symbol"] == "AAPL"
+    assert p["top_contributors"][0]["day_pnl"] == pytest.approx(200.0)
+    assert p["top_detractors"][0]["symbol"] == "XOM"
+    assert p["top_detractors"][0]["day_pnl"] == pytest.approx(-400.0)
+
+
+def test_option_day_pnl_uses_100x_multiplier(session: Session) -> None:
+    session.add_all(
+        [
+            Holding(account_id="U1", symbol="OPTX", as_of_date=_AS_OF,
+                    asset_category="OPT", quantity=2, market_value=300.0,
+                    side="LONG", currency="USD", source="csv"),
+            DailyPrice(symbol="OPTX", trade_date=date(2026, 5, 20), close=1.0),
+            DailyPrice(symbol="OPTX", trade_date=date(2026, 5, 21), close=1.5),
+        ]
+    )
+    session.commit()
+    h = build_morning_call(session)["holdings"][0]
+    # 2 contracts × (1.5−1.0) × 100 = 100
+    assert h["day_pnl"] == pytest.approx(100.0)
+
+
+def test_unrealized_fallback_from_avg_cost(session: Session) -> None:
+    # CSV holding: no unrealized_pnl / cost_basis_total on the row.
+    session.add_all(
+        [
+            Holding(account_id="U1", symbol="ZZZ", as_of_date=_AS_OF,
+                    asset_category="STK", quantity=10, avg_cost=150.0,
+                    market_value=2000.0, side="LONG", currency="USD", source="csv"),
+            DailyPrice(symbol="ZZZ", trade_date=date(2026, 5, 21), close=200.0),
+        ]
+    )
+    session.commit()
+    h = build_morning_call(session)["holdings"][0]
+    # (200−150) × 10 = 500 ; pct vs avg-cost basis 150×10=1500 → 33.3%
+    assert h["unrealized_pnl"] == pytest.approx(500.0)
+    assert h["unrealized_pnl_pct"] == pytest.approx(33.333, abs=0.01)
+
+
+def test_cash_excluded_from_day_pnl(session: Session) -> None:
+    session.add(
+        Holding(account_id="U1", symbol="USD.CAD", as_of_date=_AS_OF,
+                asset_category="CASH", quantity=-4000, market_value=-5500.0,
+                side="SHORT", currency="CAD", source="flex")
+    )
+    session.commit()
+    mc = build_morning_call(session)
+    assert mc["holdings"][0]["day_pnl"] is None
+    assert mc["portfolio"]["day_pnl"] is None
+    assert "cash/forex positions excluded from day P&L attribution" in mc["notes"]
+
+
 def test_pct_uses_abs_denominator_for_shorts() -> None:
     from quant_researcher.research.morningcall import _pct
 
