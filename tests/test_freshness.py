@@ -16,6 +16,7 @@ from quant_researcher.data.freshness import (
 from quant_researcher.db import Base
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import IncomeStatement
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -174,6 +175,39 @@ def test_transcript_uses_call_date_not_known_at(session: Session) -> None:
     session.commit()
     report = check_freshness(session, ["AAPL"], scopes=("transcript",), now=NOW)
     assert report.scopes["transcript"].stale == ["AAPL"]
+
+
+# ----- insider threshold (judged on filing_date, 30d) ----------------------
+
+
+def test_insider_fresh_when_filing_within_30d(session: Session) -> None:
+    session.add(
+        InsiderTransaction(
+            symbol="AAPL", accession_no="a", line_no=0,
+            filing_date=NOW.date() - timedelta(days=10),
+        )
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("insider",), now=NOW)
+    assert report.scopes["insider"].fresh == ["AAPL"]
+    assert report.scopes["insider"].threshold_days == 30
+
+
+def test_insider_stale_when_filing_past_30d(session: Session) -> None:
+    session.add(
+        InsiderTransaction(
+            symbol="AAPL", accession_no="a", line_no=0,
+            filing_date=NOW.date() - timedelta(days=45),
+        )
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("insider",), now=NOW)
+    assert report.scopes["insider"].stale == ["AAPL"]
+
+
+def test_insider_missing_when_no_row(session: Session) -> None:
+    report = check_freshness(session, ["AAPL"], scopes=("insider",), now=NOW)
+    assert report.scopes["insider"].missing == ["AAPL"]
 
 
 # ----- stale_symbols helper ------------------------------------------------

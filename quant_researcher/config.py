@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # --scope transcript`.
     alpha_vantage_api_key: str | None = None
 
+    # Optional: SEC EDGAR requires a User-Agent identifying the requester
+    # ("Name email"). Used by `qr data refresh --scope insider` (free SEC Form 4
+    # via edgartools). SEC rejects requests without it.
+    sec_edgar_identity: str | None = None
+
     # Optional: FRED 10Y Treasury → WACC risk-free rate
     fred_api_key: str | None = None
 

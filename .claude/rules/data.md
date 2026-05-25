@@ -18,6 +18,7 @@ single source of truth:
 | `ratios` | 100 days | `MAX(known_at)` |
 | `estimates` | 7 days | `MAX(known_at)` |
 | `transcript` | 100 days | `MAX(call_date)` from `transcripts` — quarterly, judged on the call's own date (not `known_at`), like `financials` |
+| `insider` | 30 days | `MAX(filing_date)` from `insider_transactions` — Form 4s land sporadically; re-check monthly |
 
 **`transcript` scope (Phase 3)**: source is **Alpha Vantage**, NOT FMP — FMP gates
 transcripts behind a premium tier (402), AV serves them on the free key. Its own
@@ -34,6 +35,20 @@ skipped=1`); a hard `AlphaVantageError` → `ok=False` (isolated). Brand-new tab
 `qr db init` auto-creates it (no ALTER). **Excluded from `--scope all`** (free tier
 ~25 req/day; per-name pull) — run targeted: `--scope transcript --symbols SYM`.
 AV free tier is ~1 req/sec; the client self-throttles (`min_interval_s`).
+
+**`insider` scope (Phase 5)**: source is **free SEC EDGAR** via the `edgartools`
+dependency (FMP gates insider data). `data/edgar.py` `EdgarClient(identity)` sets
+SEC's mandatory User-Agent (`SEC_EDGAR_IDENTITY`, "Name email") and pulls recent
+Form 4 filings → flattens each `.obj().to_dataframe()` into transaction rows.
+`refresh_insider` UPSERTs by PK `(symbol, accession_no, line_no)` via
+`session.merge` (filings are immutable); no Form 4s in the lookback window → soft-skip
+(`ok=True, skipped=1`); a hard `EdgarError` → `ok=False` (isolated). Its own CLI
+branch (no FMP/AV client; `EdgarClient` is not a context manager). Brand-new table
+`insider_transactions` → `qr db init` auto-creates it (no ALTER). **Excluded from
+`--scope all`** (per-name, network-heavy via SEC's ≤10 req/s) — run targeted.
+Note: 13F institutional ownership is deliberately deferred (it's an inverse lookup
+needing a CUSIP↔ticker map + 45-day lag — a separate project; edgartools is
+manager-centric).
 
 The "is it stale" logic flows through only two functions: `check_freshness(session,
 symbols)` (for reports) and `stale_symbols(session, scope, symbols)` (for

@@ -13,6 +13,7 @@ from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.db import Base
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.holdings import Holding
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -308,6 +309,38 @@ def test_bundle_transcript_section_none_when_missing(session: Session) -> None:
     _seed_full_robust(session, "AAPL")  # no Transcript seeded
     _, payload = bundle(session, "AAPL", save=False)
     assert payload["transcript"] is None
+
+
+def test_bundle_insider_section(session: Session) -> None:
+    _seed_full_robust(session, "AAPL")
+    td = date.today() - timedelta(days=12)
+    fd = date.today() - timedelta(days=10)
+    session.add_all([
+        InsiderTransaction(
+            symbol="AAPL", accession_no="a", line_no=0, filing_date=fd,
+            transaction_date=td, insider="X", position="CEO",
+            transaction_type="Purchase", code="P", shares=1000.0, price=50.0, value=50000.0,
+        ),
+        InsiderTransaction(
+            symbol="AAPL", accession_no="a", line_no=1, filing_date=fd,
+            transaction_date=td, insider="Y", position="CFO",
+            transaction_type="Sale", code="S", shares=200.0, price=51.0, value=10200.0,
+        ),
+    ])
+    session.commit()
+    p = build_bundle(session, "AAPL")
+    ins = p["insider"]
+    assert ins["transactions"] == 2
+    assert ins["open_market_buys"] == 1
+    assert ins["open_market_sells"] == 1
+    assert ins["net_open_market_value"] == pytest.approx(50000.0 - 10200.0)
+    assert len(ins["recent"]) == 2
+
+
+def test_bundle_insider_none_when_missing(session: Session) -> None:
+    _seed_full_robust(session, "AAPL")  # no insider rows
+    p = build_bundle(session, "AAPL")
+    assert p["insider"] is None
 
 
 def _seed_two_years(session: Session, sym: str = "MSFT") -> None:

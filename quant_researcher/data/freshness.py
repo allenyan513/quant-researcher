@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import IncomeStatement
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -43,6 +44,7 @@ FINANCIALS_STALE_AFTER = timedelta(days=100)
 RATIOS_STALE_AFTER = timedelta(days=100)
 ESTIMATES_STALE_AFTER = timedelta(days=7)
 TRANSCRIPT_STALE_AFTER = timedelta(days=100)  # quarterly cadence, like financials
+INSIDER_STALE_AFTER = timedelta(days=30)  # Form 4s land sporadically; re-check monthly
 
 SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "profile": PROFILE_STALE_AFTER,
@@ -51,6 +53,7 @@ SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "ratios": RATIOS_STALE_AFTER,
     "estimates": ESTIMATES_STALE_AFTER,
     "transcript": TRANSCRIPT_STALE_AFTER,
+    "insider": INSIDER_STALE_AFTER,
 }
 
 
@@ -144,6 +147,13 @@ def _compute_scope(
         # known_at — re-ingesting an old call must not reset the freshness clock.
         latest = _latest_per_symbol(
             session, Transcript.symbol, Transcript.call_date, symbols
+        )
+        cutoff_date = now.date() - threshold
+        fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)
+    elif scope == "insider":
+        # Judge on the latest Form 4 filing date (the SEC filing event).
+        latest = _latest_per_symbol(
+            session, InsiderTransaction.symbol, InsiderTransaction.filing_date, symbols
         )
         cutoff_date = now.date() - threshold
         fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)

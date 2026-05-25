@@ -11,6 +11,7 @@ MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 ME: `holdings`, `morning_call_snapshots`, `trades`. MD: `news_items`,
 `research_bundles`. MF: `decisions`, `decision_tracking`. MH:
 `backtest_runs`. MG: `signals`, `signal_runs`. Phase 3: `transcripts`.
+Phase 5: `insider_transactions`.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from quant_researcher.models.decisions import Decision, DecisionTracking
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.holdings import Holding
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.morningcall import MorningCallSnapshot
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
@@ -44,6 +46,7 @@ __all__ = [
     "FinancialRatios",
     "Holding",
     "IncomeStatement",
+    "InsiderTransaction",
     "MorningCallSnapshot",
     "NewsItem",
     "Profile",

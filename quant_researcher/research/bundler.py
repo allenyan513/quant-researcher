@@ -24,7 +24,7 @@ Sections:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -34,6 +34,7 @@ from quant_researcher.contract import code_version
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.holdings import Holding
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -65,6 +66,7 @@ def build_bundle(
         "quality": _quality_section(session, symbol),
         "ratio_history": _ratio_history(session, symbol),
         "holdings": _holdings_section(session, symbol),
+        "insider": _insider_section(session, symbol),
         "news": _recent_news(session, symbol, news_limit),
         "transcript": _transcript_section(session, symbol),
     }
@@ -324,6 +326,57 @@ def _transcript_section(session: Session, symbol: str) -> dict[str, Any] | None:
         "quarter": row.quarter,
         "call_date": row.call_date.isoformat() if row.call_date else None,
         "excerpt": (row.content or "")[:2000] or None,
+    }
+
+
+def _insider_section(
+    session: Session, symbol: str, *, lookback_days: int = 180
+) -> dict[str, Any] | None:
+    """Recent insider (Form 4) activity: open-market buy/sell tallies + notable rows.
+
+    Open-market purchases (code 'P') vs sales ('S') are the discretionary signal;
+    grants/exercises/tax (A/M/F/G) are compensation noise, counted only in totals.
+    """
+    cutoff = date.today() - timedelta(days=lookback_days)
+    rows = list(
+        session.scalars(
+            select(InsiderTransaction)
+            .where(InsiderTransaction.symbol == symbol)
+            .where(InsiderTransaction.transaction_date >= cutoff)
+            .order_by(InsiderTransaction.transaction_date.desc())
+        )
+    )
+    if not rows:
+        return None
+
+    def _sum(rs: list[InsiderTransaction], attr: str) -> float:
+        return sum(getattr(r, attr) or 0.0 for r in rs)
+
+    buys = [r for r in rows if (r.code or "").upper() == "P"]
+    sells = [r for r in rows if (r.code or "").upper() == "S"]
+    last_filing = max((r.filing_date for r in rows if r.filing_date), default=None)
+    return {
+        "lookback_days": lookback_days,
+        "transactions": len(rows),
+        "open_market_buys": len(buys),
+        "open_market_sells": len(sells),
+        "buy_shares": _sum(buys, "shares"),
+        "sell_shares": _sum(sells, "shares"),
+        "net_open_market_value": _sum(buys, "value") - _sum(sells, "value"),
+        "last_filing_date": last_filing.isoformat() if last_filing else None,
+        "recent": [
+            {
+                "date": r.transaction_date.isoformat() if r.transaction_date else None,
+                "insider": r.insider,
+                "position": r.position,
+                "type": r.transaction_type,
+                "code": r.code,
+                "shares": r.shares,
+                "price": r.price,
+                "value": r.value,
+            }
+            for r in rows[:8]
+        ],
     }
 
 
