@@ -123,6 +123,9 @@ def test_balance_sheet_table_shape() -> None:
         "cash_and_equivalents",
         "short_term_debt",
         "long_term_debt",
+        "retained_earnings",
+        "current_assets",
+        "current_liabilities",
     } == cols
     assert [c.name for c in t.primary_key.columns] == ["symbol", "period", "fiscal_date"]
 
