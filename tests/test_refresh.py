@@ -10,11 +10,13 @@ from sqlalchemy import create_engine, insert, select
 from sqlalchemy.orm import Session
 
 from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
+from quant_researcher.data.edgar import EdgarClient, EdgarError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.refresh import (
     _as_datetime,
     refresh_estimates,
     refresh_financials,
+    refresh_insider,
     refresh_profile,
     refresh_quotes,
     refresh_ratios,
@@ -23,6 +25,7 @@ from quant_researcher.data.refresh import (
 from quant_researcher.db import Base
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -49,6 +52,11 @@ def fmp() -> MagicMock:
 @pytest.fixture
 def av() -> MagicMock:
     return MagicMock(spec=AlphaVantageClient)
+
+
+@pytest.fixture
+def edgar() -> MagicMock:
+    return MagicMock(spec=EdgarClient)
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -1041,4 +1049,95 @@ def test_refresh_transcript_only_stale_skips_fresh(
 
     result = refresh_transcript(session, av, ["NVDA"])  # default only_stale=True
     av.get_earnings_transcript.assert_not_called()
+    assert result.outcomes == []
+
+
+# ----- insider (SEC Form 4) ------------------------------------------------
+
+
+def _insider_rows(accession: str = "0001-26-000001", n: int = 2) -> list[dict]:
+    rows = [
+        {"accession_no": accession, "line_no": 0, "filing_date": date(2026, 5, 10),
+         "transaction_date": date(2026, 5, 8), "insider": "Jane Exec", "position": "CEO",
+         "transaction_type": "Purchase", "code": "P", "shares": 1000.0, "price": 50.0,
+         "value": 50000.0, "remaining_shares": 9000.0, "security": "Common Stock"},
+        {"accession_no": accession, "line_no": 1, "filing_date": date(2026, 5, 10),
+         "transaction_date": date(2026, 5, 8), "insider": "Jane Exec", "position": "CEO",
+         "transaction_type": "Sale", "code": "S", "shares": 200.0, "price": 51.0,
+         "value": 10200.0, "remaining_shares": 8800.0, "security": "Common Stock"},
+    ]
+    return rows[:n]
+
+
+def test_refresh_insider_inserts(session: Session, edgar: MagicMock) -> None:
+    edgar.get_insider_transactions.return_value = _insider_rows()
+    result = refresh_insider(session, edgar, ["NVDA"], only_stale=False)
+    session.commit()
+
+    assert result.total_upserted == 2
+    r0 = session.get(InsiderTransaction, ("NVDA", "0001-26-000001", 0))
+    assert r0 is not None
+    assert r0.code == "P"
+    assert r0.shares == 1000.0
+    assert r0.insider == "Jane Exec"
+    assert r0.known_at is not None
+
+
+def test_refresh_insider_no_filings_soft_skips(session: Session, edgar: MagicMock) -> None:
+    edgar.get_insider_transactions.return_value = []
+    result = refresh_insider(session, edgar, ["NVDA"], only_stale=False)
+    session.commit()
+
+    assert result.succeeded == ["NVDA"]
+    assert result.total_upserted == 0
+    assert result.total_skipped == 1
+    assert result.failed == []
+    assert list(session.scalars(select(InsiderTransaction))) == []
+
+
+def test_refresh_insider_merge_dedups_by_pk(session: Session, edgar: MagicMock) -> None:
+    edgar.get_insider_transactions.return_value = _insider_rows(n=1)
+    refresh_insider(session, edgar, ["NVDA"], only_stale=False)
+    session.commit()
+
+    revised = _insider_rows(n=1)
+    revised[0]["value"] = 55555.0
+    edgar.get_insider_transactions.return_value = revised
+    refresh_insider(session, edgar, ["NVDA"], only_stale=False)
+    session.commit()
+
+    rows = list(session.scalars(select(InsiderTransaction)))
+    assert len(rows) == 1  # same (symbol, accession_no, line_no) → overwrite
+    assert rows[0].value == 55555.0
+
+
+def test_refresh_insider_isolates_per_symbol_errors(
+    session: Session, edgar: MagicMock
+) -> None:
+    def side_effect(symbol: str, *, since=None):
+        if symbol == "BAD":
+            raise EdgarError("boom")
+        return _insider_rows(n=1)
+
+    edgar.get_insider_transactions.side_effect = side_effect
+    result = refresh_insider(session, edgar, ["NVDA", "BAD", "MSFT"], only_stale=False)
+    session.commit()
+
+    assert sorted(result.succeeded) == ["MSFT", "NVDA"]
+    assert [f["symbol"] for f in result.failed] == ["BAD"]
+
+
+def test_refresh_insider_only_stale_skips_fresh(
+    session: Session, edgar: MagicMock
+) -> None:
+    session.add(
+        InsiderTransaction(
+            symbol="NVDA", accession_no="a", line_no=0,
+            filing_date=date.today() - timedelta(days=5),
+        )
+    )
+    session.commit()
+
+    result = refresh_insider(session, edgar, ["NVDA"])  # default only_stale=True
+    edgar.get_insider_transactions.assert_not_called()
     assert result.outcomes == []

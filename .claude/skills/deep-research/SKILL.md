@@ -33,12 +33,13 @@ context and narrative; it never overrides a `qr` number.
 Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
 `data`. Run these for the one symbol (`SYM`):
 
-1. `qr data freshness` — refresh only `SYM`'s stale scopes:
-   `qr data refresh --scope <scope> --symbols SYM` for each stale scope
-   (profile / quote / financials / ratios / estimates). Also pull the latest
-   call: `qr data refresh --scope transcript --symbols SYM` (Alpha Vantage, free
-   tier — soft-skips if unavailable). Don't `--force` the whole universe; it
-   spends FMP quota.
+1. `qr data freshness --symbols SYM` — if anything's stale, refresh the
+   fundamentals in **one call**: `qr data refresh --scope all --symbols SYM`
+   (only-stale by default; covers profile / quote / financials / ratios /
+   estimates). Then pull the two scopes excluded from `all` (their own free
+   sources): `qr data refresh --scope transcript --symbols SYM` (Alpha Vantage —
+   soft-skips if unavailable) and `qr data refresh --scope insider --symbols SYM`
+   (SEC Form 4 via EDGAR). Don't `--force`; it spends FMP quota.
 2. `qr research bundle SYM` — the structured base. Read:
    - `profile` · `latest_price` · `ratios_latest_annual` (incl. `roic`,
      `earnings_yield`)
@@ -47,10 +48,12 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
      multi-year `trends` (revenue / margins / ROIC)
    - **`ratio_history`** — multi-year multiples + `latest_percentile_vs_history`
      (cheap/expensive vs the stock's own past)
-   - `valuation_snapshots` · **`transcript`** (latest call: year/quarter/excerpt;
-     `raw` carries speaker-segmented text + per-segment sentiment) · `news` ·
-     `holdings` (your position + cost basis, if any)
-   - Surface every `notes` entry (stale prices, missing data) **verbatim**.
+   - `valuation_snapshots` · **`transcript`** (latest call: year / quarter /
+     call_date / ~2000-char excerpt — for fuller speaker-segmented text +
+     sentiment, read the `transcripts` table directly) · **`insider`** (recent
+     Form 4 open-market buy/sell tally + notable trades) · `news` · `holdings`
+     (your position + cost basis, if any)
+   - Any section is `null` when its data is missing — say so, don't invent it.
 3. `qr earnings SYM` — actual-vs-estimate EPS/revenue surprise (only where an
    estimate exists — historical surprise is **sparse**; never imply a beat/miss
    without one) + any recorded ledger thesis/decisions.
@@ -99,8 +102,10 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
 7. **Catalysts** — near-term events + the next earnings date (cited).
 8. **Risks** — financial-quality flags (low F-score, weak accruals, distress-zone
    Z'') + web-sourced risks.
-9. **Ownership / positioning** — your holding; insider / 13F / short interest are
-   not yet ingested into `qr`, so source those from the web if relevant (cited).
+9. **Ownership / positioning** — your holding (`holdings`) + **insider activity**
+   from `qr`'s `insider` section (open-market buys vs sells, notable Form 4s).
+   13F institutional ownership / short interest aren't ingested yet → source from
+   the web if relevant (cited).
 10. **Thesis & recommendation** — bull / base / bear and your conviction. Offer to
     record it: `qr ledger add SYM --side buy|sell --thesis "…" --confidence N`,
     citing the valuation `snapshot_id` so forward alpha can be graded later.
@@ -115,9 +120,10 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
 - **Reverse DCF is the value-investor headline** (what growth the price bakes in).
   The plain forward DCF on default assumptions is unreliable — present valuation
   through the reverse read + the scenario band, not a single point estimate.
-- **Be honest about coverage.** Surface bundle `notes` verbatim; name `missing`
+- **Be honest about coverage.** Surface `notes` from `qr earnings` / `qr value`
+  verbatim; flag any `null` bundle section as missing data; name `missing`
   Piotroski legs; flag sparse earnings surprise; note the transcript `call_date`
   is a derived quarter-end placeholder (Alpha Vantage omits the exact date), and
-  the transcript scope soft-skips when unavailable.
+  the transcript / insider scopes soft-skip when unavailable.
 - **Persistence is opt-in.** Default is chat output only. Record a decision to the
   ledger (or save elsewhere, e.g. Notion) only when the user explicitly asks.

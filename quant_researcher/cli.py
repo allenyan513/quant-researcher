@@ -1801,7 +1801,9 @@ def universe_list(
 # ---------------------------------------------------------------------------
 
 
-_VALID_SCOPES = ("profile", "quote", "financials", "ratios", "estimates", "transcript", "all")
+_VALID_SCOPES = (
+    "profile", "quote", "financials", "ratios", "estimates", "transcript", "insider", "all"
+)
 
 
 @data_app.command("refresh")
@@ -1853,7 +1855,10 @@ def data_refresh(
     quarters and takes the first with data; soft-skips when none. Deliberately NOT
     in `--scope all` (free-tier ~25 req/day; per-name pull) — run it targeted with
     `--symbols`.
-    `--scope all`: runs every scope above EXCEPT transcript.
+    `--scope insider`: persist recent SEC Form 4 insider transactions per symbol
+    from **free SEC EDGAR** (via edgartools; needs `SEC_EDGAR_IDENTITY`). Also NOT
+    in `--scope all` (per-name, network-heavy) — run targeted with `--symbols`.
+    `--scope all`: runs every scope above EXCEPT transcript and insider.
 
     **MA-4 breaking change**: default is now only-stale. Each scope's
     response includes `skipped_fresh: [...]` listing symbols that already
@@ -1863,11 +1868,13 @@ def data_refresh(
     from sqlalchemy import select
 
     from quant_researcher.data.alphavantage import AlphaVantageClient
+    from quant_researcher.data.edgar import EdgarClient
     from quant_researcher.data.fmp import FMPClient
     from quant_researcher.data.freshness import stale_symbols
     from quant_researcher.data.refresh import (
         refresh_estimates,
         refresh_financials,
+        refresh_insider,
         refresh_profile,
         refresh_quotes,
         refresh_ratios,
@@ -1884,13 +1891,22 @@ def data_refresh(
             )
         )
     cfg = settings()
-    # Transcript pulls from Alpha Vantage (its own key); every other scope is FMP.
+    # Each ownership scope has its own free source/credential; the rest are FMP.
     if scope == "transcript":
         if not cfg.alpha_vantage_api_key:
             _emit(
                 Envelope.failure(
                     "missing_alpha_vantage_api_key",
                     "ALPHA_VANTAGE_API_KEY is not set (configure it in .env).",
+                )
+            )
+    elif scope == "insider":
+        if not cfg.sec_edgar_identity:
+            _emit(
+                Envelope.failure(
+                    "missing_sec_edgar_identity",
+                    "SEC_EDGAR_IDENTITY is not set (configure it in .env, e.g. "
+                    "'Your Name you@example.com' — SEC requires a User-Agent).",
                 )
             )
     elif not cfg.fmp_api_key:
@@ -1945,6 +1961,20 @@ def data_refresh(
                 effective, skipped = _resolve(sess, "transcript")
                 r = refresh_transcript(sess, client, effective, only_stale=False)
                 scopes_out["transcript"] = {
+                    "succeeded_count": len(r.succeeded),
+                    "failed": r.failed,
+                    "total_upserted": r.total_upserted,
+                    "total_skipped": r.total_skipped,
+                    "skipped_fresh": skipped,
+                }
+        elif scope == "insider":
+            # Insider Form 4 from free SEC EDGAR (edgartools); its own identity,
+            # also never part of `--scope all` (per-name, network-heavy).
+            edgar_client = EdgarClient(identity=cfg.sec_edgar_identity)
+            with session_factory()() as sess, sess.begin():
+                effective, skipped = _resolve(sess, "insider")
+                r = refresh_insider(sess, edgar_client, effective, only_stale=False)
+                scopes_out["insider"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,

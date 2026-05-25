@@ -23,10 +23,12 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
+from quant_researcher.data.edgar import EdgarClient, EdgarError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.freshness import stale_symbols
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
+from quant_researcher.models.insider import InsiderTransaction
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
@@ -780,6 +782,65 @@ _QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 def _quarter_end_date(year: int, quarter: int) -> date:
     month, day = _QUARTER_END[quarter]
     return date(year, month, day)
+
+
+_INSIDER_LOOKBACK_DAYS = 180
+
+
+def refresh_insider(
+    session: Session,
+    client: EdgarClient,
+    symbols: list[str],
+    *,
+    only_stale: bool = True,
+    lookback_days: int = _INSIDER_LOOKBACK_DAYS,
+    today: date | None = None,
+) -> RefreshResult:
+    """Persist recent SEC Form 4 insider transactions per symbol (free, via EDGAR).
+
+    Pulls Form 4 filings from the last `lookback_days` and UPSERTs each
+    transaction by PK `(symbol, accession_no, line_no)` via `session.merge` —
+    filings are immutable, so re-running dedups. A symbol with no Form 4s in the
+    window is soft-skipped (ok=True, skipped=1); a hard `EdgarError` isolates to
+    ok=False and the loop continues.
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "insider", symbols)
+    since = (today or date.today()) - timedelta(days=lookback_days)
+    outcomes: list[SymbolOutcome] = []
+    for sym in symbols:
+        try:
+            rows = client.get_insider_transactions(sym, since=since)
+        except EdgarError as exc:
+            outcomes.append(SymbolOutcome(sym, ok=False, error=str(exc)))
+            continue
+        if not rows:
+            outcomes.append(SymbolOutcome(sym, ok=True, skipped=1))
+            continue
+        for r in rows:
+            session.merge(InsiderTransaction(**_insider_from_row(sym, r)))
+        outcomes.append(SymbolOutcome(sym, ok=True, upserted=len(rows)))
+    return RefreshResult(scope="insider", outcomes=outcomes)
+
+
+def _insider_from_row(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
+    """Map one EdgarClient transaction row → InsiderTransaction kwargs."""
+    return {
+        "symbol": symbol,
+        "accession_no": row["accession_no"],
+        "line_no": row["line_no"],
+        "filing_date": row.get("filing_date"),
+        "transaction_date": row.get("transaction_date"),
+        "insider": row.get("insider"),
+        "position": row.get("position"),
+        "transaction_type": row.get("transaction_type"),
+        "code": row.get("code"),
+        "shares": row.get("shares"),
+        "price": row.get("price"),
+        "value": row.get("value"),
+        "remaining_shares": row.get("remaining_shares"),
+        "known_at": datetime.now(UTC),
+    }
 
 
 # ----- coercion helpers ----------------------------------------------------
