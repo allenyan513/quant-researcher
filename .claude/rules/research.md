@@ -37,9 +37,14 @@ published_at, url)`. Before tuple comparison, `_key()` strips both sides' tz-awa
 datetimes to naive UTC, because a `DateTime(timezone=True)` column read from SQLite
 is naive while Postgres is aware.
 
-**transcript_excerpt is caller-provided**: the bundler doesn't call FMP
-`/earning-call-transcript` (that endpoint is large; even truncated to 2000 chars
-it's several KB). `qr research bundle` v1 passes no transcript, leaving a hook.
+**transcript section (Phase 3)**: the bundler's `_transcript_section` reads the
+**latest persisted** `Transcript` row (PK `(symbol, year, quarter)`, ordered desc)
+→ `transcript` payload key with year / quarter / call_date + a ~2000-char excerpt;
+None when absent. The old caller-injected `transcript_excerpt` param was removed —
+persistence (via `qr data refresh --scope transcript`, see `data.md`) replaced the
+v1 hook. The bundler stays FMP-free (pure DB read). **Note**: the *earnings* path
+(`read_earnings` / `qr earnings --transcript`) still fetches a transcript online and
+injects it — that's a separate live surface, unchanged by Phase 3.
 
 ## morningcall — portfolio morning briefing (features §E)
 

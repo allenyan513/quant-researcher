@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Required at MA (data warehouse ingestion)
     fmp_api_key: str | None = None
 
+    # Optional: Alpha Vantage — earnings-call transcripts (FMP gates them behind
+    # a premium tier; AV serves them on the free key). Used by `qr data refresh
+    # --scope transcript`.
+    alpha_vantage_api_key: str | None = None
+
     # Optional: FRED 10Y Treasury → WACC risk-free rate
     fred_api_key: str | None = None
 

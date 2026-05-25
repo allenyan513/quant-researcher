@@ -17,6 +17,7 @@ from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.models.research import NewsItem, ResearchBundle
+from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research.bundler import build_bundle, bundle
 from quant_researcher.research.refresh import refresh_news
@@ -284,12 +285,29 @@ def test_bundle_skip_save(session: Session) -> None:
     assert session.scalars(select(ResearchBundle)).first() is None
 
 
-def test_bundle_transcript_excerpt_truncates(session: Session) -> None:
+def test_bundle_transcript_section_truncates(session: Session) -> None:
     _seed_full_robust(session, "AAPL")
-    long_transcript = "abc " * 1000
-    _, payload = bundle(session, "AAPL", save=False, transcript_excerpt=long_transcript)
-    assert payload["transcript_excerpt"] is not None
-    assert len(payload["transcript_excerpt"]) <= 2000
+    session.add(
+        Transcript(
+            symbol="AAPL", year=2025, quarter=2,
+            call_date=date(2025, 5, 1), content="abc " * 1000,
+        )
+    )
+    session.commit()
+    _, payload = bundle(session, "AAPL", save=False)
+    t = payload["transcript"]
+    assert t is not None
+    assert t["year"] == 2025
+    assert t["quarter"] == 2
+    assert t["call_date"] == "2025-05-01"
+    assert t["excerpt"] is not None
+    assert len(t["excerpt"]) <= 2000
+
+
+def test_bundle_transcript_section_none_when_missing(session: Session) -> None:
+    _seed_full_robust(session, "AAPL")  # no Transcript seeded
+    _, payload = bundle(session, "AAPL", save=False)
+    assert payload["transcript"] is None
 
 
 def _seed_two_years(session: Session, sym: str = "MSFT") -> None:

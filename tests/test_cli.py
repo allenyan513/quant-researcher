@@ -498,7 +498,7 @@ def test_data_freshness_per_scope_summary(memory_db) -> None:
 
 
 def test_data_freshness_all_scope(memory_db) -> None:
-    """`qr data freshness` with default scope covers all 5 known scopes."""
+    """`qr data freshness` with default scope covers all known scopes."""
     _seed_universe(memory_db, ["AAPL"])
     result = runner.invoke(app, ["data", "freshness"])
     assert result.exit_code == 0
@@ -509,6 +509,7 @@ def test_data_freshness_all_scope(memory_db) -> None:
         "financials",
         "ratios",
         "estimates",
+        "transcript",
     }
     # Fresh DB → every scope is fully missing.
     for scope_name, sf in data["scopes"].items():

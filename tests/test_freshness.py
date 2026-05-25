@@ -19,6 +19,7 @@ from quant_researcher.models.financials import IncomeStatement
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.transcripts import Transcript
 
 
 @pytest.fixture
@@ -127,6 +128,52 @@ def test_financials_uses_fiscal_date_not_known_at(session: Session) -> None:
 def test_financials_missing_when_no_row(session: Session) -> None:
     report = check_freshness(session, ["AAPL"], scopes=("financials",), now=NOW)
     assert report.scopes["financials"].missing == ["AAPL"]
+
+
+# ----- transcript threshold (judged on call_date, 100d) --------------------
+
+
+def test_transcript_fresh_when_call_date_within_100d(session: Session) -> None:
+    session.add(
+        Transcript(
+            symbol="AAPL", year=2024, quarter=1,
+            call_date=NOW.date() - timedelta(days=50),
+        )
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("transcript",), now=NOW)
+    assert report.scopes["transcript"].fresh == ["AAPL"]
+    assert report.scopes["transcript"].threshold_days == 100
+
+
+def test_transcript_stale_when_call_date_past_100d(session: Session) -> None:
+    session.add(
+        Transcript(
+            symbol="AAPL", year=2023, quarter=1,
+            call_date=NOW.date() - timedelta(days=120),
+        )
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("transcript",), now=NOW)
+    assert report.scopes["transcript"].stale == ["AAPL"]
+
+
+def test_transcript_missing_when_no_row(session: Session) -> None:
+    report = check_freshness(session, ["AAPL"], scopes=("transcript",), now=NOW)
+    assert report.scopes["transcript"].missing == ["AAPL"]
+
+
+def test_transcript_uses_call_date_not_known_at(session: Session) -> None:
+    # Fresh ingest (known_at=now) but the call itself is 200d old → stale.
+    session.add(
+        Transcript(
+            symbol="AAPL", year=2023, quarter=1,
+            call_date=NOW.date() - timedelta(days=200), known_at=NOW,
+        )
+    )
+    session.commit()
+    report = check_freshness(session, ["AAPL"], scopes=("transcript",), now=NOW)
+    assert report.scopes["transcript"].stale == ["AAPL"]
 
 
 # ----- stale_symbols helper ------------------------------------------------
