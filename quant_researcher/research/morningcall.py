@@ -86,24 +86,25 @@ def build_morning_call(
         valuation = _pick_valuation(_recent_valuations(session, h.symbol))
         news = _recent_news(session, h.symbol, news_per_holding)
         decision = decisions.get(h.symbol)
+        unrealized = _unrealized(h, latest_close)
 
         views.append(
             {
                 "symbol": h.symbol,
                 "account_id": h.account_id,
                 "sector": sector,
+                "asset_category": h.asset_category,
                 "quantity": h.quantity,
                 "market_value": h.market_value,
                 "weight_pct": _pct(h.market_value, total_mv),
                 "avg_cost": h.avg_cost,
-                "unrealized_pnl": h.unrealized_pnl,
-                "unrealized_pnl_pct": _pct(
-                    h.unrealized_pnl, _cost_basis(h)
-                ),
+                "unrealized_pnl": unrealized,
+                "unrealized_pnl_pct": _pct(unrealized, _cost_basis(h)),
                 "side": h.side,
                 "latest_close": latest_close,
                 "prev_close": prev_close,
                 "day_change_pct": _pct_change(latest_close, prev_close),
+                "day_pnl": _day_pnl(h, latest_close, prev_close),
                 "price_date": price_date,
                 "ratios": _lean_ratios(ratios),
                 "valuation": valuation,
@@ -217,7 +218,7 @@ def _portfolio_summary(
     total_mv: float | None,
     notes: list[str],
 ) -> dict[str, Any]:
-    total_pnl = _sum_attr(holdings, "unrealized_pnl")
+    total_pnl = _sum_floats(views, "unrealized_pnl")
     total_cost = sum(c for c in (_cost_basis(h) for h in holdings) if c is not None) or None
 
     # cash: sum CASH-category positions, else None + note
@@ -255,15 +256,34 @@ def _portfolio_summary(
     movers.sort(key=lambda v: v["day_change_pct"], reverse=True)
     mover_keys = ("symbol", "day_change_pct", "market_value")
 
+    # Daily P&L attribution: dollar contribution per position (signed market
+    # value × close-to-close), summed over priced non-cash holdings. day_pnl_pct
+    # is anchored to the prior-day portfolio value so the two are consistent.
+    day_pnl = _sum_floats(views, "day_pnl")
+    prev_value = sum(
+        pv for pv in (_holding_prev_value(v) for v in views) if pv is not None
+    ) or None
+    if any((h.asset_category or "").upper() == "CASH" for h in holdings):
+        notes.append("cash/forex positions excluded from day P&L attribution")
+    contributors = [v for v in views if v["day_pnl"] is not None]
+    contributors.sort(key=lambda v: v["day_pnl"], reverse=True)
+    contrib_keys = ("symbol", "day_pnl", "day_change_pct", "market_value")
+
     return {
         "total_market_value": total_mv,
         "total_unrealized_pnl": total_pnl,
         "total_unrealized_pnl_pct": _pct(total_pnl, total_cost),
+        "day_pnl": day_pnl,
+        "day_pnl_pct": _pct(day_pnl, prev_value),
         "cash": cash,
         "currency": currency,
         "sector_exposure": sector_exposure,
         "top_movers": [{k: v[k] for k in mover_keys} for v in movers[:3]],
         "bottom_movers": [{k: v[k] for k in mover_keys} for v in movers[-3:][::-1]],
+        "top_contributors": [{k: v[k] for k in contrib_keys} for v in contributors[:3]],
+        "top_detractors": [
+            {k: v[k] for k in contrib_keys} for v in contributors[-3:][::-1]
+        ],
         "decided_positions_count": sum(1 for v in views if v["decision"] is not None),
     }
 
@@ -284,12 +304,56 @@ def _lean_ratios(ratios: dict[str, Any] | None) -> dict[str, Any] | None:
     return {k: ratios.get(k) for k in ("pe_ratio", "peg_ratio", "return_on_equity", "net_margin")}
 
 
+def _contract_multiplier(asset_category: str | None) -> float:
+    """Options quote per-share but trade in 100-share contracts; everything else 1."""
+    return 100.0 if (asset_category or "").upper() == "OPT" else 1.0
+
+
 def _cost_basis(h: Holding) -> float | None:
     if h.cost_basis_total is not None:
         return h.cost_basis_total
+    if h.avg_cost is not None and h.quantity is not None:
+        return h.avg_cost * h.quantity * _contract_multiplier(h.asset_category)
     if h.market_value is not None and h.unrealized_pnl is not None:
         return h.market_value - h.unrealized_pnl
     return None
+
+
+def _unrealized(h: Holding, latest_close: float | None) -> float | None:
+    """Flex-provided unrealized P&L if present, else (close − avg_cost) × qty × mult.
+
+    The fallback lets CSV holdings (no `unrealized_pnl`/`cost_basis_total`) still
+    show a P&L. Cash/forex is excluded — its P&L convention differs.
+    """
+    if h.unrealized_pnl is not None:
+        return h.unrealized_pnl
+    if (h.asset_category or "").upper() == "CASH":
+        return None
+    if latest_close is None or h.avg_cost is None or h.quantity is None:
+        return None
+    return (latest_close - h.avg_cost) * h.quantity * _contract_multiplier(h.asset_category)
+
+
+def _day_pnl(
+    h: Holding, latest_close: float | None, prev_close: float | None
+) -> float | None:
+    """Close-to-close dollar P&L for the position (None for cash/unpriced rows)."""
+    if (h.asset_category or "").upper() == "CASH":
+        return None
+    if latest_close is None or prev_close is None or h.quantity is None:
+        return None
+    return (
+        h.quantity * (latest_close - prev_close) * _contract_multiplier(h.asset_category)
+    )
+
+
+def _holding_prev_value(v: dict[str, Any]) -> float | None:
+    """Prior-day market value of a holding view (signed; None for cash/unpriced)."""
+    if (v.get("asset_category") or "").upper() == "CASH":
+        return None
+    if v["prev_close"] is None or v["quantity"] is None:
+        return None
+    return v["quantity"] * v["prev_close"] * _contract_multiplier(v.get("asset_category"))
 
 
 def _sum_attr(holdings: list[Holding], attr: str) -> float | None:
