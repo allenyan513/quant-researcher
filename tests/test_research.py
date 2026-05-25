@@ -292,6 +292,80 @@ def test_bundle_transcript_excerpt_truncates(session: Session) -> None:
     assert len(payload["transcript_excerpt"]) <= 2000
 
 
+def _seed_two_years(session: Session, sym: str = "MSFT") -> None:
+    """Two FY years with full balance-sheet fields + ratios so scores compute."""
+    session.add(
+        Profile(symbol=sym, sector="Technology", beta=1.1,
+                raw={"marketCap": 3e12}, known_at=datetime.now(UTC))
+    )
+    session.add(
+        DailyPrice(symbol=sym, trade_date=date.today() - timedelta(days=1), close=400.0)
+    )
+    # (year, ni, rev, gp, oi, eps, ta, tl, te, ltd, re, ca, cl, ocf, fcf,
+    #  pe, ev_ebitda, ps, pb, fcf_yield, roic)
+    rows = [
+        (2023, 70e9, 210e9, 140e9, 80e9, 9.0, 380e9, 190e9, 190e9, 60e9, 120e9,
+         160e9, 90e9, 85e9, 65e9, 30.0, 20.0, 11.0, 12.0, 0.03, 0.25),
+        (2024, 90e9, 245e9, 170e9, 100e9, 12.0, 410e9, 180e9, 230e9, 55e9, 160e9,
+         180e9, 95e9, 110e9, 95e9, 34.0, 23.0, 12.0, 14.0, 0.035, 0.30),
+    ]
+    for (yr, ni, rev, gp, oi, eps, ta, tl, te, ltd, re, ca, cl, ocf, fcf,
+         pe, evebitda, ps, pb, fcfy, roic) in rows:
+        fd = date(yr, 6, 30)
+        session.add(IncomeStatement(
+            symbol=sym, period="FY", fiscal_date=fd, revenue=rev, net_income=ni,
+            gross_profit=gp, operating_income=oi, eps_diluted=eps,
+            known_at=datetime.now(UTC)))
+        session.add(BalanceSheet(
+            symbol=sym, period="FY", fiscal_date=fd, total_assets=ta,
+            total_liabilities=tl, total_equity=te, long_term_debt=ltd,
+            retained_earnings=re, current_assets=ca, current_liabilities=cl,
+            known_at=datetime.now(UTC)))
+        session.add(CashFlow(
+            symbol=sym, period="FY", fiscal_date=fd, operating_cash_flow=ocf,
+            free_cash_flow=fcf, known_at=datetime.now(UTC)))
+        session.add(FinancialRatios(
+            symbol=sym, period="FY", fiscal_date=fd, pe_ratio=pe,
+            ev_to_ebitda=evebitda, price_to_sales=ps, price_to_book=pb,
+            fcf_yield=fcfy, return_on_invested_capital=roic,
+            known_at=datetime.now(UTC)))
+    session.commit()
+
+
+def test_bundle_scores_section_computes(session: Session) -> None:
+    _seed_two_years(session, "MSFT")
+    p = build_bundle(session, "MSFT")
+    sc = p["scores"]
+    assert sc["fiscal_year"] == 2024
+    assert sc["prior_fiscal_year"] == 2023
+    assert sc["piotroski_f"]["score"] == 9  # all nine legs improve YoY in the seed
+    assert sc["piotroski_f"]["max_possible"] == 9
+    assert sc["altman_z"]["zone"] in {"safe", "grey", "distress"}
+    # ROIC now surfaced in the latest-annual ratios section
+    assert p["ratios_latest_annual"]["roic"] == pytest.approx(0.30)
+
+
+def test_bundle_quality_and_history(session: Session) -> None:
+    _seed_two_years(session, "MSFT")
+    p = build_bundle(session, "MSFT")
+    q = p["quality"]
+    assert q["fcf_conversion"] == pytest.approx(95e9 / 90e9)
+    assert q["roic"] == pytest.approx(0.30)
+    assert q["trends"]["revenue"]["direction"] == "up"
+    rh = p["ratio_history"]
+    assert len(rh["multiples"]["pe_ratio"]) == 2
+    assert rh["multiples"]["fiscal_dates"][0] == "2023-06-30"  # ascending order
+
+
+def test_bundle_scores_none_when_no_financials(session: Session) -> None:
+    session.add(Profile(symbol="GHOST2", raw={}, known_at=datetime.now(UTC)))
+    session.commit()
+    p = build_bundle(session, "GHOST2")
+    assert p["scores"] is None
+    assert p["quality"] is None
+    assert p["ratio_history"] is None
+
+
 def test_bundle_holdings_picks_latest_per_account(session: Session) -> None:
     """Multiple snapshots per (account, symbol) → bundle takes the most recent per account."""
     sym = "AAPL"

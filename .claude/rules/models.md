@@ -41,8 +41,20 @@ point-in-time queries.
   `earnings_yield` were added this way (`ALTER TABLE financial_ratios ADD COLUMN
   return_on_invested_capital double precision; ADD COLUMN earnings_yield double
   precision;`), then backfilled with `qr data refresh --scope ratios --force`.
+  Phase-1 deep-dive added `balance_sheet.retained_earnings` / `current_assets` /
+  `current_liabilities` the same way (`ALTER TABLE balance_sheet ADD COLUMN
+  retained_earnings double precision; ADD COLUMN current_assets double precision;
+  ADD COLUMN current_liabilities double precision;`). **Backfilling a new
+  *statement* column differs from ratios**: `_ingest_statement` is insert-only
+  (filed statements are immutable), so `qr data refresh --force` re-fetches but
+  *skips* existing rows and will NOT populate the new column. Backfill existing
+  rows from the stored `raw` JSON instead (zero FMP): `UPDATE balance_sheet SET
+  current_assets = NULLIF(raw->>'totalCurrentAssets','')::double precision, …`.
+  Rows from future quarters get the column automatically via the refresh mapper.
 - **Change / drop a column**: manual SQL in the Neon console, in order: edit model
-  + run tests → ALTER prod → deploy.
+  + run tests → ALTER prod → deploy. ⚠ For an **add**, the order is the same:
+  ALTER prod **before** deploying the model change, or ORM reads that `SELECT` the
+  new column hit "column does not exist" until the ALTER lands.
 
 ## gotcha
 

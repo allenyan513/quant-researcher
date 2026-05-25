@@ -9,10 +9,22 @@ paths:
 
 The **bundler** (`quant_researcher/research/bundler.py`) is a pure DB aggregator —
 it doesn't call FMP, only reads the warehouse. `build_bundle(session, symbol)` runs
-9 section helpers (`_profile_section` / `_latest_price` / `_latest_ratios` /
+the section helpers (`_profile_section` / `_latest_price` / `_latest_ratios` /
 `_recent_statements` × 3 / `_forward_estimates` / `_recent_valuations` /
 `_holdings_section` / `_recent_news`); each returns None / [] on missing data.
 `bundle(...)` adds persistence to `research_bundles` on top of build_bundle.
+
+**Phase 1 quality/quant sections** (additive keys on the same payload): `scores`
+(Piotroski F over 2 FYs + Altman **Z''**, the 4-factor cross-industry variant —
+not the manufacturing Z), `quality` (ROIC−WACC spread, FCF conversion, accruals,
+multi-year margin/ROIC/revenue trends), `ratio_history` (multi-year FY multiples +
+latest-vs-own-history percentile), and `roic`/`earnings_yield` surfaced in
+`ratios_latest_annual`. The math lives in `research/scores.py` (pure functions, no
+DB, like `valuation/dcf.py`); the bundler fetches annual (`period='FY'`) rows and
+feeds them. `_safe_wacc` lazy-imports `valuation.wacc` with default rf/erp, so the
+ROIC−WACC spread is an approximate, default-assumption signal. Altman Z'' needs
+`balance_sheet.retained_earnings` / `current_assets` / `current_liabilities` (added
+for this — see `data.md`); until prod is ALTER'd + backfilled those legs are None.
 
 **FMP 402 soft-fail** (`quant_researcher/data/fmp.py` `get_news` /
 `get_earnings_transcript`): when the user's plan excludes a premium endpoint FMP

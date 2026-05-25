@@ -58,6 +58,10 @@ class BalanceSheet(_FinancialStatementMixin, Base):
     cash_and_equivalents: Mapped[float | None] = mapped_column(Float)
     short_term_debt: Mapped[float | None] = mapped_column(Float)
     long_term_debt: Mapped[float | None] = mapped_column(Float)
+    # Added for quality scores (Piotroski F current-ratio leg + Altman Z'').
+    retained_earnings: Mapped[float | None] = mapped_column(Float)
+    current_assets: Mapped[float | None] = mapped_column(Float)
+    current_liabilities: Mapped[float | None] = mapped_column(Float)
 
 
 class CashFlow(_FinancialStatementMixin, Base):

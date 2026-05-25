@@ -417,6 +417,9 @@ def _balance_from_fmp(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
             "cash_and_equivalents": _as_float(row.get("cashAndCashEquivalents")),
             "short_term_debt": _as_float(row.get("shortTermDebt")),
             "long_term_debt": _as_float(row.get("longTermDebt")),
+            "retained_earnings": _as_float(row.get("retainedEarnings")),
+            "current_assets": _as_float(row.get("totalCurrentAssets")),
+            "current_liabilities": _as_float(row.get("totalCurrentLiabilities")),
         }
     )
     return base
