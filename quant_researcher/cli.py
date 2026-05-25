@@ -1801,7 +1801,7 @@ def universe_list(
 # ---------------------------------------------------------------------------
 
 
-_VALID_SCOPES = ("profile", "quote", "financials", "ratios", "estimates", "all")
+_VALID_SCOPES = ("profile", "quote", "financials", "ratios", "estimates", "transcript", "all")
 
 
 @data_app.command("refresh")
@@ -1848,7 +1848,12 @@ def data_refresh(
     quarterly, `known_at = acceptedDate` per D6).
     `--scope ratios`: `/ratios` rows per period (`known_at = now`).
     `--scope estimates`: forward analyst consensus (`session.merge` revises).
-    `--scope all`: runs every scope in the order above.
+    `--scope transcript`: persist the latest earnings-call transcript per symbol
+    from **Alpha Vantage** (free tier; needs `ALPHA_VANTAGE_API_KEY`). Walks recent
+    quarters and takes the first with data; soft-skips when none. Deliberately NOT
+    in `--scope all` (free-tier ~25 req/day; per-name pull) — run it targeted with
+    `--symbols`.
+    `--scope all`: runs every scope above EXCEPT transcript.
 
     **MA-4 breaking change**: default is now only-stale. Each scope's
     response includes `skipped_fresh: [...]` listing symbols that already
@@ -1857,6 +1862,7 @@ def data_refresh(
     """
     from sqlalchemy import select
 
+    from quant_researcher.data.alphavantage import AlphaVantageClient
     from quant_researcher.data.fmp import FMPClient
     from quant_researcher.data.freshness import stale_symbols
     from quant_researcher.data.refresh import (
@@ -1865,6 +1871,7 @@ def data_refresh(
         refresh_profile,
         refresh_quotes,
         refresh_ratios,
+        refresh_transcript,
     )
     from quant_researcher.db import session_factory
     from quant_researcher.models.universe import UniverseMember
@@ -1877,7 +1884,16 @@ def data_refresh(
             )
         )
     cfg = settings()
-    if not cfg.fmp_api_key:
+    # Transcript pulls from Alpha Vantage (its own key); every other scope is FMP.
+    if scope == "transcript":
+        if not cfg.alpha_vantage_api_key:
+            _emit(
+                Envelope.failure(
+                    "missing_alpha_vantage_api_key",
+                    "ALPHA_VANTAGE_API_KEY is not set (configure it in .env).",
+                )
+            )
+    elif not cfg.fmp_api_key:
         _emit(
             Envelope.failure(
                 "missing_fmp_api_key", "FMP_API_KEY is not set (configure it in .env)."
@@ -1918,68 +1934,86 @@ def data_refresh(
 
     try:
         scopes_out: dict[str, dict] = {}
-        with (
-            session_factory()() as sess,
-            sess.begin(),
-            FMPClient(api_key=cfg.fmp_api_key) as client,
-        ):
-            if scope in ("profile", "all"):
-                effective, skipped = _resolve(sess, "profile")
-                r = refresh_profile(sess, client, effective, only_stale=False)
-                scopes_out["profile"] = {
-                    "succeeded_count": len(r.succeeded),
-                    "failed": r.failed,
-                    "total_upserted": r.total_upserted,
-                    "skipped_fresh": skipped,
-                }
-            if scope in ("quote", "all"):
-                effective, skipped = _resolve(sess, "quote")
-                r = refresh_quotes(
-                    sess, client, effective, lookback_days=lookback_days, only_stale=False
-                )
-                scopes_out["quote"] = {
+        # Transcript is its own world: Alpha Vantage source + key, never part of
+        # `--scope all` (premium-gated on FMP, large payloads, per-name pull).
+        if scope == "transcript":
+            with (
+                session_factory()() as sess,
+                sess.begin(),
+                AlphaVantageClient(api_key=cfg.alpha_vantage_api_key) as client,
+            ):
+                effective, skipped = _resolve(sess, "transcript")
+                r = refresh_transcript(sess, client, effective, only_stale=False)
+                scopes_out["transcript"] = {
                     "succeeded_count": len(r.succeeded),
                     "failed": r.failed,
                     "total_upserted": r.total_upserted,
                     "total_skipped": r.total_skipped,
                     "skipped_fresh": skipped,
                 }
-            if scope in ("financials", "all"):
-                effective, skipped = _resolve(sess, "financials")
-                r = refresh_financials(
-                    sess, client, effective, periods=parsed_periods, only_stale=False
-                )
-                scopes_out["financials"] = {
-                    "succeeded_count": len(r.succeeded),
-                    "failed": r.failed,
-                    "total_upserted": r.total_upserted,
-                    "total_skipped": r.total_skipped,
-                    "skipped_fresh": skipped,
-                }
-            if scope in ("ratios", "all"):
-                effective, skipped = _resolve(sess, "ratios")
-                r = refresh_ratios(
-                    sess, client, effective, periods=parsed_periods, only_stale=False
-                )
-                scopes_out["ratios"] = {
-                    "succeeded_count": len(r.succeeded),
-                    "failed": r.failed,
-                    "total_upserted": r.total_upserted,
-                    "total_skipped": r.total_skipped,
-                    "skipped_fresh": skipped,
-                }
-            if scope in ("estimates", "all"):
-                effective, skipped = _resolve(sess, "estimates")
-                r = refresh_estimates(
-                    sess, client, effective, periods=parsed_periods, only_stale=False
-                )
-                scopes_out["estimates"] = {
-                    "succeeded_count": len(r.succeeded),
-                    "failed": r.failed,
-                    "total_upserted": r.total_upserted,
-                    "total_skipped": r.total_skipped,
-                    "skipped_fresh": skipped,
-                }
+        else:
+            with (
+                session_factory()() as sess,
+                sess.begin(),
+                FMPClient(api_key=cfg.fmp_api_key) as client,
+            ):
+                if scope in ("profile", "all"):
+                    effective, skipped = _resolve(sess, "profile")
+                    r = refresh_profile(sess, client, effective, only_stale=False)
+                    scopes_out["profile"] = {
+                        "succeeded_count": len(r.succeeded),
+                        "failed": r.failed,
+                        "total_upserted": r.total_upserted,
+                        "skipped_fresh": skipped,
+                    }
+                if scope in ("quote", "all"):
+                    effective, skipped = _resolve(sess, "quote")
+                    r = refresh_quotes(
+                        sess, client, effective, lookback_days=lookback_days, only_stale=False
+                    )
+                    scopes_out["quote"] = {
+                        "succeeded_count": len(r.succeeded),
+                        "failed": r.failed,
+                        "total_upserted": r.total_upserted,
+                        "total_skipped": r.total_skipped,
+                        "skipped_fresh": skipped,
+                    }
+                if scope in ("financials", "all"):
+                    effective, skipped = _resolve(sess, "financials")
+                    r = refresh_financials(
+                        sess, client, effective, periods=parsed_periods, only_stale=False
+                    )
+                    scopes_out["financials"] = {
+                        "succeeded_count": len(r.succeeded),
+                        "failed": r.failed,
+                        "total_upserted": r.total_upserted,
+                        "total_skipped": r.total_skipped,
+                        "skipped_fresh": skipped,
+                    }
+                if scope in ("ratios", "all"):
+                    effective, skipped = _resolve(sess, "ratios")
+                    r = refresh_ratios(
+                        sess, client, effective, periods=parsed_periods, only_stale=False
+                    )
+                    scopes_out["ratios"] = {
+                        "succeeded_count": len(r.succeeded),
+                        "failed": r.failed,
+                        "total_upserted": r.total_upserted,
+                        "total_skipped": r.total_skipped,
+                        "skipped_fresh": skipped,
+                    }
+                if scope in ("estimates", "all"):
+                    effective, skipped = _resolve(sess, "estimates")
+                    r = refresh_estimates(
+                        sess, client, effective, periods=parsed_periods, only_stale=False
+                    )
+                    scopes_out["estimates"] = {
+                        "succeeded_count": len(r.succeeded),
+                        "failed": r.failed,
+                        "total_upserted": r.total_upserted,
+                        "total_skipped": r.total_skipped,
+                        "skipped_fresh": skipped,
+                    }
     except Exception as exc:
         _emit(Envelope.failure("data_refresh_failed", str(exc)))
     else:

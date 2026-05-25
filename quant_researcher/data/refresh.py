@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
+from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.freshness import stale_symbols
 from quant_researcher.models.estimates import AnalystEstimate
@@ -29,6 +30,7 @@ from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeSta
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.transcripts import Transcript
 
 
 @dataclass(frozen=True)
@@ -682,6 +684,102 @@ def _estimate_from_fmp(
         "raw": row,
         "known_at": datetime.now(UTC),
     }
+
+
+_TRANSCRIPT_LOOKBACK_QUARTERS = 4
+
+
+def refresh_transcript(
+    session: Session,
+    client: AlphaVantageClient,
+    symbols: list[str],
+    *,
+    only_stale: bool = True,
+    max_lookback: int = _TRANSCRIPT_LOOKBACK_QUARTERS,
+    today: date | None = None,
+) -> RefreshResult:
+    """Persist the LATEST earnings-call transcript per symbol via Alpha Vantage.
+
+    AV's transcript endpoint needs an explicit quarter (no "latest"), so we walk
+    recent quarter labels newest→oldest (up to `max_lookback`) and take the first
+    that has data — that's the latest available. The row is UPSERTed by PK
+    `(symbol, year, quarter)` via `session.merge`. A symbol with no transcript in
+    the window (or a rate-limited reply) is *soft-skipped* (ok=True, skipped=1);
+    a hard `AlphaVantageError` isolates to ok=False and the loop continues.
+
+    AV omits the call's date, so `call_date` (used only for the 100-day freshness
+    check) is derived from the quarter end. The full speaker-segmented payload —
+    incl. per-segment sentiment — is kept in `raw`; `content` is the joined text.
+    """
+    if only_stale:
+        symbols = stale_symbols(session, "transcript", symbols)
+    quarters = _recent_quarter_labels(today or date.today(), max_lookback)
+    outcomes: list[SymbolOutcome] = []
+    for sym in symbols:
+        try:
+            mapped: dict[str, Any] | None = None
+            for qlabel in quarters:
+                payload = client.get_earnings_transcript(sym, quarter=qlabel)
+                if payload is not None:
+                    mapped = _transcript_from_av(sym, qlabel, payload)
+                    break
+        except AlphaVantageError as exc:
+            outcomes.append(SymbolOutcome(sym, ok=False, error=str(exc)))
+            continue
+        if mapped is None:
+            outcomes.append(SymbolOutcome(sym, ok=True, skipped=1))
+            continue
+        session.merge(Transcript(**mapped))
+        outcomes.append(SymbolOutcome(sym, ok=True, upserted=1))
+    return RefreshResult(scope="transcript", outcomes=outcomes)
+
+
+def _transcript_from_av(
+    symbol: str, quarter_label: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Map an Alpha Vantage transcript payload → Transcript kwargs."""
+    year, quarter = _parse_quarter_label(quarter_label)
+    segments = payload.get("transcript") or []
+    parts = [
+        f"{s.get('speaker', '')} — {s.get('title', '')}: {s.get('content', '')}".strip()
+        for s in segments
+        if s.get("content")
+    ]
+    return {
+        "symbol": symbol,
+        "year": year,
+        "quarter": quarter,
+        "call_date": _quarter_end_date(year, quarter),
+        "content": "\n\n".join(parts) or None,
+        "raw": payload,
+        "known_at": datetime.now(UTC),
+    }
+
+
+def _recent_quarter_labels(today: date, n: int) -> list[str]:
+    """`n` calendar-quarter labels (`YYYY'Q'N`) ending at `today`, newest first."""
+    year, quarter = today.year, (today.month - 1) // 3 + 1
+    labels: list[str] = []
+    for _ in range(n):
+        labels.append(f"{year}Q{quarter}")
+        quarter -= 1
+        if quarter == 0:
+            quarter, year = 4, year - 1
+    return labels
+
+
+def _parse_quarter_label(label: str) -> tuple[int, int]:
+    """`'2025Q1'` → `(2025, 1)`."""
+    year_s, quarter_s = label.split("Q")
+    return int(year_s), int(quarter_s)
+
+
+_QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+
+
+def _quarter_end_date(year: int, quarter: int) -> date:
+    month, day = _QUARTER_END[quarter]
+    return date(year, month, day)
 
 
 # ----- coercion helpers ----------------------------------------------------

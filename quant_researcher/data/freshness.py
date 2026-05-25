@@ -33,6 +33,7 @@ from quant_researcher.models.financials import IncomeStatement
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.transcripts import Transcript
 
 # --- Hardcoded thresholds (MA-4) -------------------------------------------
 
@@ -41,6 +42,7 @@ QUOTE_STALE_AFTER = timedelta(days=3)
 FINANCIALS_STALE_AFTER = timedelta(days=100)
 RATIOS_STALE_AFTER = timedelta(days=100)
 ESTIMATES_STALE_AFTER = timedelta(days=7)
+TRANSCRIPT_STALE_AFTER = timedelta(days=100)  # quarterly cadence, like financials
 
 SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "profile": PROFILE_STALE_AFTER,
@@ -48,6 +50,7 @@ SCOPE_THRESHOLDS: dict[str, timedelta] = {
     "financials": FINANCIALS_STALE_AFTER,
     "ratios": RATIOS_STALE_AFTER,
     "estimates": ESTIMATES_STALE_AFTER,
+    "transcript": TRANSCRIPT_STALE_AFTER,
 }
 
 
@@ -133,6 +136,14 @@ def _compute_scope(
     elif scope == "financials":
         latest = _latest_per_symbol(
             session, IncomeStatement.symbol, IncomeStatement.fiscal_date, symbols
+        )
+        cutoff_date = now.date() - threshold
+        fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)
+    elif scope == "transcript":
+        # Judge on the call's own date (like financials' fiscal_date), not
+        # known_at — re-ingesting an old call must not reset the freshness clock.
+        latest = _latest_per_symbol(
+            session, Transcript.symbol, Transcript.call_date, symbols
         )
         cutoff_date = now.date() - threshold
         fresh, stale, missing = _partition_dates(symbols, latest, cutoff_date)

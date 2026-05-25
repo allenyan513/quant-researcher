@@ -14,8 +14,8 @@ Sections:
 * `valuation_snapshots` — most recent ValuationSnapshot per model_type
 * `holdings` — latest Holding row per account (so you see "what I own + cost basis + unrealized")
 * `news` — last N NewsItem rows (default 10)
-* `transcript_excerpt` — first ~2000 chars of latest earnings_call transcript
-  if one is fetched and cached (caller usually passes None for v1)
+* `transcript` — latest persisted earnings-call transcript: year / quarter /
+  call_date + a ~2000-char excerpt (ingested by `qr data refresh --scope transcript`)
 
 `bundle(session, symbol, *, save=True)` persists the result to
 `research_bundles` and returns `(bundle_id, payload)` for the CLI.
@@ -38,6 +38,7 @@ from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.models.research import NewsItem, ResearchBundle
+from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research import scores
 
@@ -47,7 +48,6 @@ def build_bundle(
     symbol: str,
     *,
     news_limit: int = 10,
-    transcript_excerpt: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate everything the warehouse knows about `symbol` → dict."""
     payload: dict[str, Any] = {
@@ -66,7 +66,7 @@ def build_bundle(
         "ratio_history": _ratio_history(session, symbol),
         "holdings": _holdings_section(session, symbol),
         "news": _recent_news(session, symbol, news_limit),
-        "transcript_excerpt": (transcript_excerpt or "")[:2000] or None,
+        "transcript": _transcript_section(session, symbol),
     }
     return payload
 
@@ -76,7 +76,6 @@ def bundle(
     symbol: str,
     *,
     news_limit: int = 10,
-    transcript_excerpt: str | None = None,
     save: bool = True,
 ) -> tuple[str | None, dict[str, Any]]:
     """Build + (optionally) persist a research bundle.
@@ -87,7 +86,6 @@ def bundle(
         session,
         symbol,
         news_limit=news_limit,
-        transcript_excerpt=transcript_excerpt,
     )
     if not save:
         return None, payload
@@ -309,6 +307,24 @@ def _recent_news(session: Session, symbol: str, limit: int) -> list[dict[str, An
         }
         for r in rows
     ]
+
+
+def _transcript_section(session: Session, symbol: str) -> dict[str, Any] | None:
+    """Latest persisted earnings-call transcript: metadata + ~2000-char excerpt."""
+    row = session.scalars(
+        select(Transcript)
+        .where(Transcript.symbol == symbol)
+        .order_by(Transcript.year.desc(), Transcript.quarter.desc())
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return {
+        "year": row.year,
+        "quarter": row.quarter,
+        "call_date": row.call_date.isoformat() if row.call_date else None,
+        "excerpt": (row.content or "")[:2000] or None,
+    }
 
 
 # ----- quality / quant sections (Phase 1) --------------------------------

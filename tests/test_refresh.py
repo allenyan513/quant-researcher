@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, insert, select
 from sqlalchemy.orm import Session
 
+from quant_researcher.data.alphavantage import AlphaVantageClient, AlphaVantageError
 from quant_researcher.data.fmp import FMPClient, FMPError
 from quant_researcher.data.refresh import (
     _as_datetime,
@@ -17,6 +18,7 @@ from quant_researcher.data.refresh import (
     refresh_profile,
     refresh_quotes,
     refresh_ratios,
+    refresh_transcript,
 )
 from quant_researcher.db import Base
 from quant_researcher.models.estimates import AnalystEstimate
@@ -24,6 +26,7 @@ from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeSta
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.transcripts import Transcript
 
 
 @pytest.fixture
@@ -41,6 +44,11 @@ def fmp() -> MagicMock:
     # quote tests that only program get_historical_prices don't blow up.
     client.get_adjusted_prices.return_value = []
     return client
+
+
+@pytest.fixture
+def av() -> MagicMock:
+    return MagicMock(spec=AlphaVantageClient)
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -926,3 +934,111 @@ def test_refresh_estimates_period_fallback_from_request(
     rows = list(session.scalars(select(AnalystEstimate)))
     assert len(rows) == 1
     assert rows[0].period == "Q"  # request_period fallback
+
+
+# ----- transcript (Alpha Vantage) ------------------------------------------
+
+_TODAY = date(2026, 5, 25)  # → walk quarters 2026Q2, 2026Q1, 2025Q4, 2025Q3
+
+
+def _av_payload(symbol: str, quarter: str, content: str = "call body") -> dict:
+    return {
+        "symbol": symbol,
+        "quarter": quarter,
+        "transcript": [
+            {"speaker": "Operator", "title": "Operator", "content": content, "sentiment": "0.0"}
+        ],
+    }
+
+
+def test_refresh_transcript_inserts_latest(session: Session, av: MagicMock) -> None:
+    # Any quarter has data → the newest in the walk (2026Q2) wins.
+    av.get_earnings_transcript.return_value = _av_payload("NVDA", "2026Q2")
+    result = refresh_transcript(session, av, ["NVDA"], only_stale=False, today=_TODAY)
+    session.commit()
+
+    assert result.total_upserted == 1
+    av.get_earnings_transcript.assert_called_once_with("NVDA", quarter="2026Q2")
+    row = session.get(Transcript, ("NVDA", 2026, 2))
+    assert row is not None
+    assert row.call_date == date(2026, 6, 30)  # quarter-end derived (AV omits date)
+    assert "call body" in row.content
+    assert row.known_at is not None
+
+
+def test_refresh_transcript_walks_back_to_older_quarter(
+    session: Session, av: MagicMock
+) -> None:
+    # Newest two quarters empty, the third has data → that one is stored.
+    def side_effect(symbol: str, *, quarter: str):
+        return _av_payload(symbol, quarter) if quarter == "2025Q4" else None
+
+    av.get_earnings_transcript.side_effect = side_effect
+    result = refresh_transcript(session, av, ["NVDA"], only_stale=False, today=_TODAY)
+    session.commit()
+
+    assert result.total_upserted == 1
+    assert session.get(Transcript, ("NVDA", 2025, 4)) is not None
+    assert av.get_earnings_transcript.call_count == 3  # 2026Q2, 2026Q1, 2025Q4
+
+
+def test_refresh_transcript_all_empty_soft_skips(session: Session, av: MagicMock) -> None:
+    av.get_earnings_transcript.return_value = None  # no quarter has data
+    result = refresh_transcript(session, av, ["NVDA"], only_stale=False, today=_TODAY)
+    session.commit()
+
+    assert result.succeeded == ["NVDA"]
+    assert result.total_upserted == 0
+    assert result.total_skipped == 1
+    assert result.failed == []
+    assert list(session.scalars(select(Transcript))) == []
+
+
+def test_refresh_transcript_merge_overwrites_pk(session: Session, av: MagicMock) -> None:
+    av.get_earnings_transcript.return_value = _av_payload("NVDA", "2026Q2", "first")
+    refresh_transcript(session, av, ["NVDA"], only_stale=False, today=_TODAY)
+    session.commit()
+
+    av.get_earnings_transcript.return_value = _av_payload("NVDA", "2026Q2", "revised")
+    refresh_transcript(session, av, ["NVDA"], only_stale=False, today=_TODAY)
+    session.commit()
+
+    rows = list(session.scalars(select(Transcript)))
+    assert len(rows) == 1
+    assert "revised" in rows[0].content
+
+
+def test_refresh_transcript_isolates_per_symbol_errors(
+    session: Session, av: MagicMock
+) -> None:
+    def side_effect(symbol: str, *, quarter: str):
+        if symbol == "BAD":
+            raise AlphaVantageError("boom")
+        return _av_payload(symbol, quarter)
+
+    av.get_earnings_transcript.side_effect = side_effect
+    result = refresh_transcript(
+        session, av, ["NVDA", "BAD", "MSFT"], only_stale=False, today=_TODAY
+    )
+    session.commit()
+
+    assert sorted(result.succeeded) == ["MSFT", "NVDA"]
+    assert [f["symbol"] for f in result.failed] == ["BAD"]
+    assert session.get(Transcript, ("NVDA", 2026, 2)) is not None
+
+
+def test_refresh_transcript_only_stale_skips_fresh(
+    session: Session, av: MagicMock
+) -> None:
+    # A transcript with a recent call_date is fresh (<100d) → no AV call.
+    session.add(
+        Transcript(
+            symbol="NVDA", year=2026, quarter=1,
+            call_date=date.today() - timedelta(days=5),
+        )
+    )
+    session.commit()
+
+    result = refresh_transcript(session, av, ["NVDA"])  # default only_stale=True
+    av.get_earnings_transcript.assert_not_called()
+    assert result.outcomes == []

@@ -17,6 +17,23 @@ single source of truth:
 | `financials` | 100 days | `MAX(fiscal_date)` from `income_statement` — "has a new quarter landed", not "recently refreshed" |
 | `ratios` | 100 days | `MAX(known_at)` |
 | `estimates` | 7 days | `MAX(known_at)` |
+| `transcript` | 100 days | `MAX(call_date)` from `transcripts` — quarterly, judged on the call's own date (not `known_at`), like `financials` |
+
+**`transcript` scope (Phase 3)**: source is **Alpha Vantage**, NOT FMP — FMP gates
+transcripts behind a premium tier (402), AV serves them on the free key. Its own
+thin client (`data/alphavantage.py` `AlphaVantageClient`, `ALPHA_VANTAGE_API_KEY`)
+and its own CLI branch (the dispatch splits: `if scope == "transcript":` opens the
+AV client, `else:` the FMP client). AV's endpoint needs an explicit quarter (no
+"latest"), so `refresh_transcript` **walks recent quarter labels** (`YYYY'Q'N`,
+newest→oldest, `_TRANSCRIPT_LOOKBACK_QUARTERS=4`) and takes the first with data;
+`session.merge` by PK `(symbol, year, quarter)`. AV omits the call date → `call_date`
+is derived from the quarter end (used only for freshness); the full speaker-segmented
+payload (with per-segment sentiment) is kept in `raw`, joined text in `content`.
+No transcript in the window / a rate-limit reply → **soft-skip** (`ok=True,
+skipped=1`); a hard `AlphaVantageError` → `ok=False` (isolated). Brand-new table →
+`qr db init` auto-creates it (no ALTER). **Excluded from `--scope all`** (free tier
+~25 req/day; per-name pull) — run targeted: `--scope transcript --symbols SYM`.
+AV free tier is ~1 req/sec; the client self-throttles (`min_interval_s`).
 
 The "is it stale" logic flows through only two functions: `check_freshness(session,
 symbols)` (for reports) and `stale_symbols(session, scope, symbols)` (for
