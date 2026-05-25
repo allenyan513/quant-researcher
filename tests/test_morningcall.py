@@ -71,9 +71,15 @@ def test_build_morning_call_portfolio_aggregates(session: Session) -> None:
     # sector exposure sorted desc → Technology (66.7%) before Energy
     assert [s["sector"] for s in p["sector_exposure"]] == ["Technology", "Energy"]
     assert p["sector_exposure"][0]["etf"] == "XLK"
-    # movers: AAPL +1.01% top, XOM -1.96% bottom
-    assert p["top_movers"][0]["symbol"] == "AAPL"
-    assert p["bottom_movers"][0]["symbol"] == "XOM"
+    # day P&L (dollars): AAPL 100×(200-198)=+200, XOM 200×(100-102)=-400 → -200
+    assert aapl["day_pnl"] == pytest.approx(200.0)
+    assert p["day_pnl"] == pytest.approx(-200.0)
+    # pct denominator is the prior-close sleeve (100×198 + 200×102 = 40200), not
+    # total_market_value (30000) — so -200/40200 = -0.4975%
+    assert p["day_pnl_pct"] == pytest.approx(-0.4975, abs=0.001)
+    # contributors/detractors by dollars: AAPL +200 top, XOM -400 bottom
+    assert p["top_contributors"][0]["symbol"] == "AAPL"
+    assert p["top_detractors"][0]["symbol"] == "XOM"
     # decision linkage
     assert p["decided_positions_count"] == 1
     assert aapl["decision"]["side"] == "buy"

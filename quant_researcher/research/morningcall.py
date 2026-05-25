@@ -104,6 +104,7 @@ def build_morning_call(
                 "latest_close": latest_close,
                 "prev_close": prev_close,
                 "day_change_pct": _pct_change(latest_close, prev_close),
+                "day_pnl": _day_pnl(h.quantity, latest_close, prev_close),
                 "price_date": price_date,
                 "ratios": _lean_ratios(ratios),
                 "valuation": valuation,
@@ -251,19 +252,27 @@ def _portfolio_summary(
     ]
     sector_exposure.sort(key=lambda s: s["weight_pct"] or 0.0, reverse=True)
 
-    movers = [v for v in views if v["day_change_pct"] is not None]
-    movers.sort(key=lambda v: v["day_change_pct"], reverse=True)
-    mover_keys = ("symbol", "day_change_pct", "market_value")
+    # Day P&L attribution in dollars (qty × close-to-close move). The pct
+    # denominator is the prior-close value of the *same priced sleeve*, so it and
+    # the numerator come from the same daily bars — total_market_value can use a
+    # different intraday mark and would mix scopes.
+    contributors = [v for v in views if v["day_pnl"] is not None]
+    contributors.sort(key=lambda v: v["day_pnl"], reverse=True)
+    contrib_keys = ("symbol", "day_pnl", "day_change_pct", "market_value")
+    day_pnl = _sum_floats(contributors, "day_pnl")
+    prior_mv = sum(v["quantity"] * v["prev_close"] for v in contributors) or None
 
     return {
         "total_market_value": total_mv,
         "total_unrealized_pnl": total_pnl,
         "total_unrealized_pnl_pct": _pct(total_pnl, total_cost),
+        "day_pnl": day_pnl,
+        "day_pnl_pct": _pct(day_pnl, prior_mv),
         "cash": cash,
         "currency": currency,
         "sector_exposure": sector_exposure,
-        "top_movers": [{k: v[k] for k in mover_keys} for v in movers[:3]],
-        "bottom_movers": [{k: v[k] for k in mover_keys} for v in movers[-3:][::-1]],
+        "top_contributors": [{k: v[k] for k in contrib_keys} for v in contributors[:3]],
+        "top_detractors": [{k: v[k] for k in contrib_keys} for v in contributors[-3:][::-1]],
         "decided_positions_count": sum(1 for v in views if v["decision"] is not None),
     }
 
@@ -315,6 +324,12 @@ def _pct_change(latest: float | None, prev: float | None) -> float | None:
     if latest is None or not prev:
         return None
     return (latest / prev - 1) * 100
+
+
+def _day_pnl(qty: float | None, latest: float | None, prev: float | None) -> float | None:
+    if qty is None or latest is None or prev is None:
+        return None
+    return qty * (latest - prev)
 
 
 def _is_stale(price_date: str) -> bool:
