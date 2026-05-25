@@ -511,6 +511,7 @@ def test_data_freshness_all_scope(memory_db) -> None:
         "estimates",
         "transcript",
         "insider",
+        "short",
     }
     # Fresh DB → every scope is fully missing.
     for scope_name, sf in data["scopes"].items():

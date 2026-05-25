@@ -38,8 +38,9 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
    (only-stale by default; covers profile / quote / financials / ratios /
    estimates). Then pull the two scopes excluded from `all` (their own free
    sources): `qr data refresh --scope transcript --symbols SYM` (Alpha Vantage —
-   soft-skips if unavailable) and `qr data refresh --scope insider --symbols SYM`
-   (SEC Form 4 via EDGAR). Don't `--force`; it spends FMP quota.
+   soft-skips if unavailable), `qr data refresh --scope insider --symbols SYM`
+   (SEC Form 4 via EDGAR), and `qr data refresh --scope short --symbols SYM`
+   (FINRA short interest, free/auth-free). Don't `--force`; it spends FMP quota.
 2. `qr research bundle SYM` — the structured base. Read:
    - `profile` · `latest_price` · `ratios_latest_annual` (incl. `roic`,
      `earnings_yield`)
@@ -51,7 +52,8 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
    - `valuation_snapshots` · **`transcript`** (latest call: year / quarter /
      call_date / ~2000-char excerpt — for fuller speaker-segmented text +
      sentiment, read the `transcripts` table directly) · **`insider`** (recent
-     Form 4 open-market buy/sell tally + notable trades) · `news` · `holdings`
+     Form 4 open-market buy/sell tally + notable trades) · **`short_interest`**
+     (days-to-cover, short shares, Δ vs prior) · `news` · `holdings`
      (your position + cost basis, if any)
    - Any section is `null` when its data is missing — say so, don't invent it.
 3. `qr earnings SYM` — actual-vs-estimate EPS/revenue surprise (only where an
@@ -103,9 +105,9 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
 8. **Risks** — financial-quality flags (low F-score, weak accruals, distress-zone
    Z'') + web-sourced risks.
 9. **Ownership / positioning** — your holding (`holdings`) + **insider activity**
-   from `qr`'s `insider` section (open-market buys vs sells, notable Form 4s).
-   13F institutional ownership / short interest aren't ingested yet → source from
-   the web if relevant (cited).
+   (`insider`: open-market buys vs sells, notable Form 4s) + **short interest**
+   (`short_interest`: days-to-cover, short shares, Δ vs prior). 13F institutional
+   ownership isn't ingested yet → source from the web if relevant (cited).
 10. **Thesis & recommendation** — bull / base / bear and your conviction. Offer to
     record it: `qr ledger add SYM --side buy|sell --thesis "…" --confidence N`,
     citing the valuation `snapshot_id` so forward alpha can be graded later.
