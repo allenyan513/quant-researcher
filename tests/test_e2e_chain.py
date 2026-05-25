@@ -145,7 +145,7 @@ def test_research_to_ledger_chain(memory_db) -> None:
     # 4) value the top name — full data so the engine produces a real number
     value = _one_ok(runner.invoke(app, ["value", "AAPL", "--model", "all"]))
     assert value["symbol"] == "AAPL"
-    assert set(value["models"]) == {"dcf", "peg", "multiples"}
+    assert set(value["models"]) == {"dcf", "peg", "multiples", "scenario"}
 
     # 5) record a decision (skip auto-bundle to keep the step warehouse-only)
     added = _one_ok(

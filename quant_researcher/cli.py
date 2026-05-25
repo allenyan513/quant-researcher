@@ -2315,7 +2315,7 @@ def value_company_cmd(
         "all",
         "--model",
         "-m",
-        help="Which valuation model(s) to run: dcf | peg | multiples | all.",
+        help="Which valuation model(s) to run: dcf | peg | multiples | scenario | all.",
     ),
     assumptions: str | None = typer.Option(
         None,
@@ -2331,11 +2331,13 @@ def value_company_cmd(
 ) -> None:
     """Run valuation models against the warehouse and persist a snapshot.
 
-    Defaults to `--model all` which runs DCF + PEG + relative multiples
-    and reports the simple mean of available per-share fair values as
-    `fair_value_per_share_mean`. Pass `--model dcf` (etc.) to limit. The
-    snapshot row in `valuation_snapshots` records assumptions + result +
-    sensitivity grid so a decision is replayable.
+    Defaults to `--model all` which runs DCF + PEG + relative multiples +
+    scenario (bull/base/bear weighted) and reports the simple mean of the
+    *independent* methods' per-share fair values as `fair_value_per_share_mean`
+    (scenario is a DCF variant, excluded from the mean). DCF also carries a
+    reverse-DCF block (the growth the current price implies). Pass `--model dcf`
+    (etc.) to limit. The snapshot row in `valuation_snapshots` records
+    assumptions + result + sensitivity grid so a decision is replayable.
     """
     import json as _json
 

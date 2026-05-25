@@ -806,7 +806,7 @@ def test_value_all_models(memory_db) -> None:
     result = runner.invoke(app, ["value", "AAPL"])
     assert result.exit_code == 0
     data = _json_lines(result.output)[0]["data"]
-    assert set(data["models"].keys()) == {"dcf", "peg", "multiples"}
+    assert set(data["models"].keys()) == {"dcf", "peg", "multiples", "scenario"}
     assert data["fair_value_per_share_mean"] is not None
 
 
