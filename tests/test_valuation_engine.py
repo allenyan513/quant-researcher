@@ -114,10 +114,13 @@ def _seed_full_company(session: Session, sym: str = "AAPL") -> None:
 def test_value_company_all_models(session: Session) -> None:
     _seed_full_company(session)
     out = value_company(session, "AAPL", model="all")
-    assert set(out["models"].keys()) == {"dcf", "peg", "multiples"}
+    assert set(out["models"].keys()) == {"dcf", "peg", "multiples", "scenario"}
     # At least DCF and multiples should produce a number.
     assert out["models"]["dcf"]["fair_value_per_share"] is not None
     assert out["models"]["multiples"]["fair_value_per_share"] is not None
+    assert out["models"]["scenario"]["fair_value_per_share"] is not None
+    # DCF now carries a reverse-DCF block.
+    assert "reverse" in out["models"]["dcf"]
     # Aggregate mean exists.
     assert out["fair_value_per_share_mean"] is not None
 
@@ -140,9 +143,9 @@ def test_value_company_persists_snapshots(session: Session) -> None:
     session.commit()
 
     rows = list(session.scalars(select(ValuationSnapshot)))
-    assert len(rows) == 3  # one per model
+    assert len(rows) == 4  # one per model (incl. scenario)
     model_types = {r.model_type for r in rows}
-    assert model_types == {"dcf", "peg", "multiples"}
+    assert model_types == {"dcf", "peg", "multiples", "scenario"}
     # The dcf row should have a sensitivity grid.
     dcf_row = next(r for r in rows if r.model_type == "dcf")
     assert dcf_row.sensitivity is not None
@@ -180,8 +183,39 @@ def test_value_company_assumptions_override(session: Session) -> None:
     assert assumptions["n_years"] == 7
 
 
+def test_value_company_scenario_model(session: Session) -> None:
+    _seed_full_company(session)
+    out = value_company(session, "AAPL", model="scenario")
+    assert set(out["models"].keys()) == {"scenario"}
+    sc = out["models"]["scenario"]
+    assert sc["fair_value_per_share"] is not None
+    assert set(sc["scenarios"].keys()) == {"bear", "base", "bull"}
+    assert sc["weight_used"] == pytest.approx(1.0)
+
+
+def test_dcf_includes_reverse_block(session: Session) -> None:
+    _seed_full_company(session)
+    out = value_company(session, "AAPL", model="dcf")
+    rev = out["models"]["dcf"]["reverse"]
+    assert rev is not None
+    assert "assumed_growth" in rev  # expectations-gap context present
+
+
+def test_scenario_excluded_from_cross_model_mean(session: Session) -> None:
+    _seed_full_company(session)
+    out = value_company(session, "AAPL", model="all")
+    independent = [
+        out["models"][m]["fair_value_per_share"]
+        for m in ("dcf", "peg", "multiples")
+        if out["models"][m]["fair_value_per_share"] is not None
+    ]
+    expected = sum(independent) / len(independent)
+    assert out["fair_value_per_share_mean"] == pytest.approx(expected)
+
+
 def test_valid_models_constant() -> None:
     assert "dcf" in VALID_MODELS
     assert "peg" in VALID_MODELS
     assert "multiples" in VALID_MODELS
+    assert "scenario" in VALID_MODELS
     assert "all" in VALID_MODELS

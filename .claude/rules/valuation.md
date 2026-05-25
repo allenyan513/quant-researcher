@@ -36,3 +36,15 @@ paths:
   stable sector beta, add a `sector_betas` table; v1 doesn't need it.
 - EPV / DDM are deferred — same schema, add as new model functions + register in
   `value_company`'s `VALID_MODELS`.
+
+**Phase 2 — reverse DCF + scenario** (`reverse_dcf.py` / `scenario.py`, both pure):
+- `reverse_dcf.implied_growth` bisects stage-1 growth so `dcf_fcff` per-share ==
+  current price (FV is monotincreasing in growth). It's surfaced as
+  `models["dcf"]["reverse"]` (incl. `gap_vs_assumed` / `gap_vs_history`), persisted
+  inside the **dcf** snapshot's `result` — it has no fair value of its own, so it is
+  NOT a separate `model_type`.
+- `scenario` IS a registered `model_type` (bull/base/bear, prob-weighted FV; auto
+  base±`scenario_delta`, probs 25/50/25, all `assumptions`-overridable). It writes
+  its own `ValuationSnapshot`, so Phase-1's bundle `valuation_snapshots` picks it up.
+- **`scenario` is excluded from `fair_value_per_share_mean`** — it's a DCF variant;
+  blending it would double-count DCF against the independent peg/multiples reads.

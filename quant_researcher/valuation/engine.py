@@ -34,9 +34,11 @@ from quant_researcher.valuation.helpers import (
 )
 from quant_researcher.valuation.multiples import value_via_multiples
 from quant_researcher.valuation.peg import value_via_peg
+from quant_researcher.valuation.reverse_dcf import implied_growth
+from quant_researcher.valuation.scenario import scenario_dcf
 from quant_researcher.valuation.wacc import wacc_for_symbol
 
-VALID_MODELS = ("dcf", "peg", "multiples", "all")
+VALID_MODELS = ("dcf", "peg", "multiples", "scenario", "all")
 
 
 def value_company(
@@ -58,7 +60,7 @@ def value_company(
 
     assumptions = dict(assumptions or {})
     models_to_run = (
-        ("dcf", "peg", "multiples") if model == "all" else (model,)
+        ("dcf", "peg", "multiples", "scenario") if model == "all" else (model,)
     )
     out: dict[str, Any] = {
         "symbol": symbol,
@@ -76,6 +78,8 @@ def value_company(
             res = value_via_peg(session, symbol)
         elif m == "multiples":
             res = value_via_multiples(session, symbol)
+        elif m == "scenario":
+            res = _run_scenario(session, symbol, assumptions)
         else:  # pragma: no cover — covered by VALID_MODELS check
             continue
         out["models"][m] = res
@@ -83,11 +87,13 @@ def value_company(
         if snap_id is not None:
             out["snapshot_ids"][m] = snap_id
 
-    # Cross-model aggregate: simple mean of available fair values.
+    # Cross-model aggregate: simple mean of available fair values. Scenario is a
+    # DCF variant, so it's excluded — blending it would double-count the DCF
+    # methodology against the independent peg / multiples reads.
     fair_values = [
         v["fair_value_per_share"]
-        for v in out["models"].values()
-        if v.get("fair_value_per_share") is not None
+        for k, v in out["models"].items()
+        if k != "scenario" and v.get("fair_value_per_share") is not None
     ]
     if fair_values:
         out["fair_value_per_share_mean"] = sum(fair_values) / len(fair_values)
@@ -184,6 +190,18 @@ def _run_dcf(
         else None
     )
 
+    reverse = _reverse_dcf_block(
+        base_fcf=base_fcf,
+        terminal_growth=terminal_growth,
+        wacc=wacc,
+        n_years=n_years,
+        net_debt=debt,
+        shares=shares,
+        current=current,
+        assumed_growth=growth_rate,
+        history=history,
+    )
+
     return {
         "fair_value_per_share": core["fair_value_per_share"],
         "current_price": current,
@@ -200,6 +218,113 @@ def _run_dcf(
             "assumptions": core["assumptions"],
         },
         "sensitivity": sens,
+        "reverse": reverse,
+    }
+
+
+def _reverse_dcf_block(
+    *,
+    base_fcf: float,
+    terminal_growth: float,
+    wacc: float,
+    n_years: int,
+    net_debt: float,
+    shares: float | None,
+    current: float | None,
+    assumed_growth: float,
+    history: list[float],
+) -> dict[str, Any] | None:
+    """Implied stage-1 growth at the current price + the expectations gap.
+
+    The gap (implied − assumed, implied − historical FCF CAGR) is the
+    value-investor signal: how much of the price rests on growth above what the
+    forward DCF assumed / what history delivered.
+    """
+    if not current or current <= 0:
+        return None
+    rev = implied_growth(
+        base_fcf=base_fcf,
+        terminal_growth=terminal_growth,
+        wacc=wacc,
+        target_price=current,
+        n_years=n_years,
+        net_debt=net_debt,
+        shares=shares,
+    )
+    hist_g = default_growth_from_history(history)
+    rev["assumed_growth"] = assumed_growth
+    rev["history_growth"] = hist_g
+    ig = rev.get("implied_growth")
+    if ig is not None:
+        rev["gap_vs_assumed"] = ig - assumed_growth
+        rev["gap_vs_history"] = (ig - hist_g) if hist_g is not None else None
+    return rev
+
+
+def _run_scenario(
+    session: Session, symbol: str, assumptions: dict[str, Any]
+) -> dict[str, Any]:
+    """Probability-weighted bull/base/bear DCF.
+
+    Scenarios auto-derive from the base-case growth (base ± `scenario_delta`,
+    probs 25/50/25) but every input — `scenarios`, `scenario_delta`, growth,
+    wacc, terminal_growth, n_years — is overridable via `assumptions`, mirroring
+    `_run_dcf`'s resolution order.
+    """
+    history = historical_fcf(session, symbol, n=5)
+    base_fcf = assumptions.get("base_fcf") or smoothed_base_fcf(history)
+    if base_fcf is None or base_fcf <= 0:
+        return {
+            "fair_value_per_share": None,
+            "note": "no positive historical FCF",
+            "history": history,
+        }
+
+    wacc = assumptions.get("wacc")
+    if wacc is None:
+        wacc, _ = wacc_for_symbol(
+            session,
+            symbol,
+            rf=assumptions.get("rf", 0.045),
+            erp=assumptions.get("erp", 0.055),
+        )
+
+    base_growth = assumptions.get("growth_rate")
+    if base_growth is None:
+        base_growth = default_growth_from_history(history) or 0.04
+    terminal_growth = assumptions.get("terminal_growth", 0.025)
+    n_years = int(assumptions.get("n_years", 5))
+    shares = assumptions.get("shares") or shares_outstanding(session, symbol)
+    debt = assumptions.get("net_debt")
+    if debt is None:
+        debt = net_debt(session, symbol) or 0.0
+
+    delta = assumptions.get("scenario_delta", 0.04)
+    scenarios = assumptions.get("scenarios") or {
+        "bear": {"growth": base_growth - delta, "prob": 0.25},
+        "base": {"growth": base_growth, "prob": 0.50},
+        "bull": {"growth": base_growth + delta, "prob": 0.25},
+    }
+
+    res = scenario_dcf(
+        base_fcf=base_fcf,
+        scenarios=scenarios,
+        terminal_growth=terminal_growth,
+        wacc=wacc,
+        n_years=n_years,
+        net_debt=debt,
+        shares=shares,
+    )
+    current = latest_close(session, symbol)
+    weighted = res["weighted_fair_value_per_share"]
+    upside = (weighted / current - 1) if (current and weighted) else None
+    return {
+        "fair_value_per_share": weighted,
+        "current_price": current,
+        "upside_pct": upside,
+        "history": history,
+        "scenarios": res["scenarios"],
+        "weight_used": res["weight_used"],
     }
 
 
