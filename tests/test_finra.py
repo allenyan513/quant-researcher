@@ -52,6 +52,26 @@ def test_filters_to_requested_symbols() -> None:
 
 
 @respx.mock
+def test_strips_whitespace_in_headers_and_values() -> None:
+    # FINRA's format is clean today, but harden the parse: a padded header or a
+    # padded symbolCode would otherwise silently drop the row (no error).
+    padded = (
+        " symbolCode | currentShortPositionQuantity | daysToCoverQuantity | issueName \n"
+        " TSLA |12000000|2.4| Tesla, Inc. \n"
+    )
+    respx.get(f"{BASE}/shrt20260515.csv").mock(return_value=httpx.Response(404))
+    respx.get(f"{BASE}/shrt20260430.csv").mock(
+        return_value=httpx.Response(200, text=padded)
+    )
+    with FinraClient() as c:
+        out = c.get_short_interest(["TSLA"], today=date(2026, 5, 25))
+    assert set(out) == {"TSLA"}  # padded symbol still matches the request
+    assert out["TSLA"]["short_interest"] == 12000000.0
+    assert out["TSLA"]["days_to_cover"] == 2.4
+    assert out["TSLA"]["security_name"] == "Tesla, Inc."  # value stripped
+
+
+@respx.mock
 def test_no_file_in_window_returns_empty() -> None:
     respx.get(url__startswith=f"{BASE}/").mock(return_value=httpx.Response(404))
     with FinraClient(max_lookback_files=2) as c:

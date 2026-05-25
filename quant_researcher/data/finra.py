@@ -119,7 +119,10 @@ def _parse(
 ) -> dict[str, dict[str, Any]]:
     # FINRA's short-interest file is PIPE-delimited (not comma).
     out: dict[str, dict[str, Any]] = {}
-    for row in csv.DictReader(io.StringIO(text), delimiter="|"):
+    reader = csv.DictReader(io.StringIO(text), delimiter="|")
+    if reader.fieldnames:  # strip header padding so row.get(key) can't silently miss
+        reader.fieldnames = [f.strip() for f in reader.fieldnames]
+    for row in reader:
         sym = (_get(row, "symbolCode", "Symbol") or "").upper()
         if not sym or sym not in wanted:
             continue
@@ -135,11 +138,13 @@ def _parse(
     return out
 
 
-def _get(row: dict[str, Any], *keys: str) -> Any:
+def _get(row: dict[str, Any], *keys: str) -> str | None:
+    # Return the stripped value: a padded symbolCode would otherwise fail the
+    # `sym not in wanted` match and silently drop the row.
     for k in keys:
         v = row.get(k)
-        if v is not None and str(v).strip() != "":
-            return v
+        if v is not None and (s := str(v).strip()):
+            return s
     return None
 
 
