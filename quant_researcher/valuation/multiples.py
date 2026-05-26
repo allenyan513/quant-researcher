@@ -18,12 +18,13 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from quant_researcher.models.profile import Profile
+from quant_researcher.research.sector_classifier import classify_stock_type, net_revenue
 from quant_researcher.valuation.helpers import (
     latest_close,
     latest_ebitda,
     latest_income_statement,
     latest_market_cap,
-    latest_revenue,
     net_debt,
     sector_for_symbol,
     sector_peer_median,
@@ -97,7 +98,15 @@ def ev_revenue_implied_price(
     peer_median = sector_peer_median(session, sector, "price_to_sales")
     # `price_to_sales` ≈ market_cap / revenue, so implied market_cap
     # = peer_median × revenue, then per-share = implied_mcap / shares.
-    revenue = latest_revenue(session, symbol)
+    # Bank-aware (issue #36): FMP's `revenue` for financials is gross
+    # (interestIncome + non-interest income); peer-median P/S is
+    # computed against analysts' net revenue. Compare net-vs-net.
+    inc = latest_income_statement(session, symbol)
+    p = session.get(Profile, symbol)
+    stock_type = classify_stock_type(
+        p.sector if p else None, p.industry if p else None
+    )
+    revenue = net_revenue(inc, stock_type) if inc is not None else None
     shares = shares_outstanding(session, symbol)
     if peer_median is not None and revenue is not None:
         implied_mcap = peer_median * revenue

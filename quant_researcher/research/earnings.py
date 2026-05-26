@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 from quant_researcher.models.decisions import Decision
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import IncomeStatement
+from quant_researcher.models.profile import Profile
+from quant_researcher.research.sector_classifier import classify_stock_type, net_revenue
 
 
 def read_earnings(
@@ -43,6 +45,15 @@ def read_earnings(
         .limit(limit)
     ).all()
 
+    # Bank-aware revenue normalization (issue #36): FMP's `revenue` for
+    # financials is gross (interestIncome + non-interest), while analyst
+    # consensus is net. Compare net-vs-net so the surprise number isn't
+    # the +111% / +144% nonsense it was before the fix.
+    p = session.get(Profile, symbol)
+    stock_type = classify_stock_type(
+        p.sector if p else None, p.industry if p else None
+    )
+
     notes: list[str] = []
     if not actuals:
         notes.append(
@@ -55,9 +66,14 @@ def read_earnings(
     for a in actuals:
         est = session.get(AnalystEstimate, (symbol, a.fiscal_date, a.period))
         actual_eps = a.eps_diluted if a.eps_diluted is not None else a.eps
+        # `revenue` on the actual block stays raw (gross for banks); the
+        # bank-aware net revenue is what gets compared to the estimate.
+        actual_rev_for_surprise = net_revenue(a, stock_type)
         if est is not None:
             matched += 1
-            surprise = _surprise(actual_eps, est.eps_avg, a.revenue, est.revenue_avg)
+            surprise = _surprise(
+                actual_eps, est.eps_avg, actual_rev_for_surprise, est.revenue_avg
+            )
             estimate = {
                 "revenue_avg": est.revenue_avg,
                 "eps_avg": est.eps_avg,
@@ -71,20 +87,26 @@ def read_earnings(
             surprise = None
             estimate = None
             note = "estimate unavailable — not captured before this period reported"
+        actual_block: dict[str, Any] = {
+            "revenue": a.revenue,
+            "net_income": a.net_income,
+            "eps": a.eps,
+            "eps_diluted": a.eps_diluted,
+            "gross_profit": a.gross_profit,
+            "operating_income": a.operating_income,
+        }
+        # For banks, surface net revenue alongside the raw (gross) line so
+        # downstream consumers see both. For non-financials this would be
+        # redundant (gross == net), so omit.
+        if stock_type == "bank":
+            actual_block["revenue_net"] = actual_rev_for_surprise
         periods.append(
             {
                 "period": a.period,
                 "fiscal_date": a.fiscal_date.isoformat(),
                 "filed_at": a.known_at.isoformat() if a.known_at else None,
                 "reported_currency": a.reported_currency,
-                "actual": {
-                    "revenue": a.revenue,
-                    "net_income": a.net_income,
-                    "eps": a.eps,
-                    "eps_diluted": a.eps_diluted,
-                    "gross_profit": a.gross_profit,
-                    "operating_income": a.operating_income,
-                },
+                "actual": actual_block,
                 "estimate_available": est is not None,
                 "estimate": estimate,
                 "surprise": surprise,
