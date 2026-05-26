@@ -37,6 +37,15 @@ def _safe_div(num: float | None, denom: float | None) -> float | None:
     return num / denom
 
 
+# EV/EBITDA = enterprise_value / EBITDA assumes "debt" on the balance sheet
+# is corporate funding to subtract from EV. For banks the largest liability
+# bucket is deposits / wholesale funding — customer money, not capital
+# structure — so net_debt blows up and equity = EV − net_debt flips
+# negative, producing a nonsense per-share value. Same shape for REITs, where
+# the right multiple is P/FFO or P/TBV, not EV/EBITDA.
+_EVEBITDA_SKIP_SECTORS = frozenset({"Financial Services", "Real Estate"})
+
+
 def pe_implied_price(session: Session, symbol: str, sector: str) -> dict[str, Any]:
     peer_median = sector_peer_median(session, sector, "pe_ratio")
     inc = latest_income_statement(session, symbol)
@@ -52,6 +61,19 @@ def pe_implied_price(session: Session, symbol: str, sector: str) -> dict[str, An
 def ev_ebitda_implied_price(
     session: Session, symbol: str, sector: str
 ) -> dict[str, Any]:
+    if sector in _EVEBITDA_SKIP_SECTORS:
+        return {
+            "peer_median_ev_ebitda": None,
+            "ebitda": None,
+            "implied_enterprise_value": None,
+            "implied_equity_value": None,
+            "shares": None,
+            "implied_price": None,
+            "note": (
+                f"EV/EBITDA n/a for {sector}: subtracting deposits / "
+                "funding liabilities from EV yields a nonsense equity value."
+            ),
+        }
     peer_median = sector_peer_median(session, sector, "ev_to_ebitda")
     ebitda = latest_ebitda(session, symbol)
     shares = shares_outstanding(session, symbol)
@@ -107,10 +129,14 @@ def value_via_multiples(session: Session, symbol: str) -> dict[str, Any]:
     ev_ebitda_result = ev_ebitda_implied_price(session, symbol, sector)
     ev_rev_result = ev_revenue_implied_price(session, symbol, sector)
 
+    # Exclude None AND non-positive implied prices from the cross-component
+    # average. A negative or zero per-share value never represents a real
+    # fair price; including one would poison the blend. Belt-and-suspenders
+    # alongside the sector gate on EV/EBITDA above.
     implied_prices = [
         r["implied_price"]
         for r in (pe_result, ev_ebitda_result, ev_rev_result)
-        if r["implied_price"] is not None
+        if r["implied_price"] is not None and r["implied_price"] > 0
     ]
     avg_implied = (
         sum(implied_prices) / len(implied_prices) if implied_prices else None

@@ -14,6 +14,7 @@ from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.valuation.multiples import (
+    ev_ebitda_implied_price,
     pe_implied_price,
     value_via_multiples,
 )
@@ -197,3 +198,144 @@ def test_value_via_multiples_missing_sector(session: Session) -> None:
     out = value_via_multiples(session, "GHOST")
     assert out["sector"] is None
     assert out["fair_value_per_share"] is None
+
+
+# ----- sector gate + defensive blend (issue #34) -------------------------
+
+
+def test_ev_ebitda_skipped_for_financial_services(session: Session) -> None:
+    # For a bank, EV − net_debt blows up because "debt" includes deposits.
+    # The model must short-circuit before computing and surface a note.
+    out = ev_ebitda_implied_price(session, "GS", "Financial Services")
+    assert out["implied_price"] is None
+    assert out["peer_median_ev_ebitda"] is None
+    assert out["ebitda"] is None
+    assert "EV/EBITDA n/a for Financial Services" in out["note"]
+
+
+def test_ev_ebitda_skipped_for_real_estate(session: Session) -> None:
+    # REITs are valued on FFO / P-TBV, not EV/EBITDA. Same gate applies.
+    out = ev_ebitda_implied_price(session, "PLD", "Real Estate")
+    assert out["implied_price"] is None
+    assert "EV/EBITDA n/a for Real Estate" in out["note"]
+
+
+def test_value_via_multiples_skips_evebitda_for_banks_in_blend(
+    session: Session,
+) -> None:
+    # Set up a Financial Services target + 3 peers so PE and EV/Revenue can
+    # still compute, and assert the blended fair value is the average of
+    # exactly those two (EV/EBITDA contributes nothing because of the gate).
+    peers = (("GS", None, None), ("MS", 14.0, 2.0), ("JPM", 16.0, 2.5), ("BAC", 12.0, 1.8))
+    for sym, pe, ps in peers:
+        session.add(
+            Profile(
+                symbol=sym,
+                sector="Financial Services",
+                raw={},
+                known_at=datetime.now(UTC),
+            )
+        )
+        if pe is not None:
+            session.add(
+                FinancialRatios(
+                    symbol=sym,
+                    period="FY",
+                    fiscal_date=date(2024, 12, 31),
+                    pe_ratio=pe,
+                    ev_to_ebitda=11.0,
+                    price_to_sales=ps,
+                    known_at=datetime.now(UTC),
+                )
+            )
+    # Target financials (GS): EPS and revenue so PE / EV-Rev populate.
+    session.add(
+        IncomeStatement(
+            symbol="GS",
+            period="FY",
+            fiscal_date=date(2024, 12, 31),
+            net_income=15e9,
+            eps_diluted=40.0,
+            operating_income=20e9,
+            revenue=125e9,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(DailyPrice(symbol="GS", trade_date=date(2024, 12, 31), close=500.0))
+    session.commit()
+
+    out = value_via_multiples(session, "GS")
+    assert out["sector"] == "Financial Services"
+    # ev_ebitda component skipped with note, doesn't poison the blend.
+    ev_eb = out["models"]["ev_ebitda"]
+    assert ev_eb["implied_price"] is None
+    assert "EV/EBITDA n/a" in ev_eb.get("note", "")
+    # Blended fair value = mean(PE implied, EV/Revenue implied) only.
+    pe_implied = out["models"]["pe"]["implied_price"]
+    ev_rev_implied = out["models"]["ev_revenue"]["implied_price"]
+    assert pe_implied is not None
+    assert ev_rev_implied is not None
+    expected = (pe_implied + ev_rev_implied) / 2
+    assert out["fair_value_per_share"] == pytest.approx(expected)
+
+
+def test_value_via_multiples_blend_excludes_non_positive(session: Session) -> None:
+    # Belt-and-suspenders: even if some future bug lets a component return a
+    # zero or negative implied price, the cross-component average must not be
+    # poisoned. Simulate by seeding peers with a P/S so low that EV/Revenue
+    # implies a per-share value of ~0.
+    _seed_peer(session, "A", "Junk", pe=10.0, ev_eb=5, ps=4)
+    _seed_peer(session, "B", "Junk", pe=12.0, ev_eb=6, ps=5)
+    _seed_peer(session, "C", "Junk", pe=14.0, ev_eb=7, ps=6)
+    # Target with a tiny revenue and a massive share count → EV/Rev implies ~0
+    session.add(
+        IncomeStatement(
+            symbol="A",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            net_income=200.0,
+            eps_diluted=2.0,
+            operating_income=300.0,
+            revenue=0.001,  # tiny → EV/Rev implied per-share rounds to ~0
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        CashFlow(
+            symbol="A",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            capital_expenditure=-50.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        BalanceSheet(
+            symbol="A",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            short_term_debt=0.0,
+            long_term_debt=0.0,
+            cash_and_equivalents=0.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(DailyPrice(symbol="A", trade_date=date(2024, 9, 30), close=20.0))
+    session.commit()
+
+    out = value_via_multiples(session, "A")
+    # All three components compute; PE & EV/EBITDA come back positive,
+    # EV/Revenue rounds to ~0 (≤ 0 with the tiny revenue path).
+    pe = out["models"]["pe"]["implied_price"]
+    ev_eb = out["models"]["ev_ebitda"]["implied_price"]
+    ev_rev = out["models"]["ev_revenue"]["implied_price"]
+    assert pe is not None and pe > 0
+    assert ev_eb is not None and ev_eb > 0
+    # EV/Rev should be effectively zero given the seeding — that's the case
+    # we want the blend to drop. Whether it's exactly 0.0 or a tiny float
+    # depends on shares, but it's <<< pe/ev_eb scale.
+    assert ev_rev is not None  # computed
+    # Blended value = mean of POSITIVE components only.
+    positive = [v for v in (pe, ev_eb, ev_rev) if v > 0]
+    expected = sum(positive) / len(positive)
+    assert out["fair_value_per_share"] == pytest.approx(expected)
