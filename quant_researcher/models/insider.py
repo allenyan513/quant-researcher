@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, Integer, String, func
+from sqlalchemy import Date, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from quant_researcher.db import Base
@@ -28,8 +28,11 @@ class InsiderTransaction(Base):
 
     filing_date: Mapped[date | None] = mapped_column(Date)
     transaction_date: Mapped[date | None] = mapped_column(Date)
-    insider: Mapped[str | None] = mapped_column(String(256))
-    position: Mapped[str | None] = mapped_column(String(256))
+    insider: Mapped[str | None] = mapped_column(String(512))
+    # SEC Form 4 officer titles can exceed varchar(256) at large issuers
+    # (compound roles like "EVP, Global Head of X, Member of the Management
+    # Committee"). Use Text to avoid arbitrary cliff cuts.
+    position: Mapped[str | None] = mapped_column(Text)
     transaction_type: Mapped[str | None] = mapped_column(String(64))
     code: Mapped[str | None] = mapped_column(String(8))
     shares: Mapped[float | None] = mapped_column(Float)

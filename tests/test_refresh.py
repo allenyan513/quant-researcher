@@ -1110,6 +1110,35 @@ def test_refresh_insider_inserts(session: Session, edgar: MagicMock) -> None:
     assert r0.known_at is not None
 
 
+def test_refresh_insider_accepts_long_position(
+    session: Session, edgar: MagicMock
+) -> None:
+    # SEC Form 4 officer titles at large issuers (banks especially) can run
+    # well past 256 chars when an insider holds compound roles. The model's
+    # `position` column is `Text` precisely to absorb these. Refresh must
+    # not crash on the long string. NOTE: SQLite does not enforce
+    # varchar(N) limits, so this is mapper-level coverage; the prod
+    # Postgres schema fix is validated by the e2e refresh of a real bank.
+    long_position = (
+        "Executive Vice President, Global Head of Investment Banking and "
+        "Member of the Management Committee and Co-Chair of the Firmwide "
+        "Capital Committee and Director of the Asset Management Division "
+        "and Member of the Board of Directors of the Trust Company and "
+        "Affiliate Boards of the Wealth Management Subsidiary"
+    )
+    assert len(long_position) > 256
+    rows = _insider_rows(n=1)
+    rows[0]["position"] = long_position
+    edgar.get_insider_transactions.return_value = rows
+    result = refresh_insider(session, edgar, ["NVDA"], only_stale=False)
+    session.commit()
+
+    assert result.total_upserted == 1
+    r0 = session.get(InsiderTransaction, ("NVDA", "0001-26-000001", 0))
+    assert r0 is not None
+    assert r0.position == long_position
+
+
 def test_refresh_insider_no_filings_soft_skips(session: Session, edgar: MagicMock) -> None:
     edgar.get_insider_transactions.return_value = []
     result = refresh_insider(session, edgar, ["NVDA"], only_stale=False)
