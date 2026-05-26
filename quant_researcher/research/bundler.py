@@ -43,6 +43,7 @@ from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research import scores
+from quant_researcher.research.sector_classifier import classify_stock_type
 
 
 def build_bundle(
@@ -131,6 +132,10 @@ def _profile_section(session: Session, symbol: str) -> dict[str, Any] | None:
         "is_adr": p.is_adr,
         "is_actively_trading": p.is_actively_trading,
         "market_cap": market_cap,
+        # Drives sector-aware report templates downstream (see `scores`,
+        # `quality` blocks below + the deep-research SKILL.md fork).
+        # Defaults to "general" for non-bank / unknown sector.
+        "stock_type": classify_stock_type(p.sector, p.industry),
     }
 
 
@@ -465,7 +470,26 @@ def _combine_year(inc: Any, bal: Any, cf: Any) -> dict[str, Any]:
 
 
 def _scores_section(session: Session, symbol: str) -> dict[str, Any] | None:
-    """Piotroski F (needs 2 FYs) + Altman Z'' (latest FY) from annual statements."""
+    """Piotroski F (needs 2 FYs) + Altman Z'' (latest FY) from annual statements.
+
+    For banks both metrics are conceptually inapplicable (working capital,
+    gross margin, FCF, accruals all break on a deposit-funded balance
+    sheet). Return a `template: "bank"` shape that names them as
+    `not_applicable` so downstream consumers don't read a misleading
+    "distress zone" verdict on a healthy bank.
+    """
+    if _stock_type_for(session, symbol) == "bank":
+        return {
+            "template": "bank",
+            "not_applicable": ["piotroski_f", "altman_z"],
+            "not_applicable_reason": (
+                "Piotroski / Altman Z'' assume a non-financial balance sheet "
+                "(working capital, gross margin, FCF). Banks structurally "
+                "carry high leverage and low working capital — the metrics "
+                "lose meaning."
+            ),
+        }
+
     inc = {r.fiscal_date.year: r for r in _annual_rows(session, IncomeStatement, symbol, 2)}
     bal = {r.fiscal_date.year: r for r in _annual_rows(session, BalanceSheet, symbol, 2)}
     cf = {r.fiscal_date.year: r for r in _annual_rows(session, CashFlow, symbol, 2)}
@@ -477,6 +501,7 @@ def _scores_section(session: Session, symbol: str) -> dict[str, Any] | None:
     prev_year = years[1] if len(years) > 1 else None
     curr = combined[curr_year]
     return {
+        "template": "general",
         "fiscal_year": curr_year,
         "prior_fiscal_year": prev_year,
         "piotroski_f": scores.piotroski_f(curr, combined[prev_year]) if prev_year else None,
@@ -493,13 +518,19 @@ def _scores_section(session: Session, symbol: str) -> dict[str, Any] | None:
 
 
 def _quality_section(session: Session, symbol: str) -> dict[str, Any] | None:
-    """ROIC−WACC, FCF conversion, accruals, and multi-year margin/ROIC/revenue trends."""
+    """ROIC−WACC, FCF conversion, accruals, multi-year trends — OR, for
+    banks (issue #37), the bank-appropriate metric set (ROA / ROE / NIM /
+    efficiency ratio / equity-to-assets) plus revenue trend.
+    """
     inc = _annual_rows(session, IncomeStatement, symbol, 6)
     if not inc:
         return None
     bal = _annual_rows(session, BalanceSheet, symbol, 6)
     cf = _annual_rows(session, CashFlow, symbol, 6)
     ratios = _annual_ratios(session, symbol, 6)
+
+    if _stock_type_for(session, symbol) == "bank":
+        return _quality_section_bank(inc, bal)
 
     latest_inc = inc[0]
     latest_bal = bal[0] if bal else None
@@ -508,6 +539,7 @@ def _quality_section(session: Session, symbol: str) -> dict[str, Any] | None:
     wacc = _safe_wacc(session, symbol)
     inc_asc = list(reversed(inc))
     return {
+        "template": "general",
         "roic": roic,
         "wacc": wacc,
         "roic_wacc_spread": scores.roic_wacc_spread(roic, wacc),
@@ -531,6 +563,74 @@ def _quality_section(session: Session, symbol: str) -> dict[str, Any] | None:
     }
 
 
+def _quality_section_bank(
+    inc: list[IncomeStatement], bal: list[BalanceSheet]
+) -> dict[str, Any]:
+    """Bank-template quality block.
+
+    NIM denominator uses `(total_assets_curr + total_assets_prev) / 2`
+    as a proxy for true earning assets (which would exclude goodwill /
+    PP&E / non-earning cash). The proxy over-states the denominator
+    slightly — documented in `scores.net_interest_margin` and in
+    `.claude/skills/deep-research/SKILL.md`. Bank metrics that FMP
+    standard endpoints don't expose (Tier-1 capital ratio, NPL ratio)
+    are surfaced in `missing_fields` so the report can supplement them
+    from filings.
+    """
+    latest_inc = inc[0]
+    latest_bal = bal[0] if bal else None
+    prev_bal = bal[1] if len(bal) > 1 else None
+    inc_asc = list(reversed(inc))
+
+    total_assets_curr = latest_bal.total_assets if latest_bal else None
+    total_assets_prev = prev_bal.total_assets if prev_bal else None
+    avg_earning_assets = None
+    if total_assets_curr is not None and total_assets_prev is not None:
+        avg_earning_assets = (total_assets_curr + total_assets_prev) / 2
+
+    # FMP's bank `/income-statement` payload doesn't expose
+    # `nonInterestExpense` / `nonInterestIncome` directly. Derive from
+    # what is there:
+    #   • non_interest_expense ≈ `operatingExpenses` (the bank operating
+    #     cost line, salaries / premises / tech, excludes interest expense)
+    #   • non_interest_income  ≈ `revenue − interestIncome`  (revenue is
+    #     bank gross = interestIncome + nonInterestIncome on the FMP feed)
+    # So the efficiency-ratio denominator simplifies to net revenue =
+    # `revenue − interestExpense`. Pull `netInterestIncome` direct.
+    nii = _extract_raw(latest_inc, "netInterestIncome")
+    interest_income = _extract_raw(latest_inc, "interestIncome")
+    non_int_expense = _extract_raw(latest_inc, "operatingExpenses")
+    revenue = latest_inc.revenue
+    non_int_income = (
+        revenue - interest_income
+        if revenue is not None and interest_income is not None
+        else None
+    )
+
+    return {
+        "template": "bank",
+        "roa": scores.roa(latest_inc.net_income, total_assets_curr),
+        "roe": scores.roe(latest_inc.net_income, latest_bal.total_equity if latest_bal else None),
+        "net_interest_margin": scores.net_interest_margin(nii, avg_earning_assets),
+        "efficiency_ratio": scores.efficiency_ratio(non_int_expense, nii, non_int_income),
+        "equity_to_assets": scores.equity_to_assets(
+            latest_bal.total_equity if latest_bal else None, total_assets_curr
+        ),
+        "trends": {
+            "revenue": scores.trend([r.revenue for r in inc_asc]),
+        },
+        "missing_fields": ["tier_1_capital_ratio", "npl_ratio"],
+        "not_applicable": [
+            "roic_wacc_spread",
+            "fcf_conversion",
+            "accruals_ratio",
+            "gross_margin_trend",
+            "operating_margin_trend",
+            "net_margin_trend",
+        ],
+    }
+
+
 def _ratio_history(session: Session, symbol: str, n: int = 10) -> dict[str, Any] | None:
     """Multi-year FY multiples + where the latest ranks vs the symbol's own history."""
     rows = _annual_ratios(session, symbol, n)
@@ -545,6 +645,32 @@ def _ratio_history(session: Session, symbol: str, n: int = 10) -> dict[str, Any]
         for k in ("pe_ratio", "ev_to_ebitda", "price_to_sales", "price_to_book")
     }
     return {"multiples": multiples, "latest_percentile_vs_history": pct}
+
+
+def _stock_type_for(session: Session, symbol: str) -> str:
+    """Resolve the symbol's stock_type from its Profile row. Used by the
+    `_scores_section` / `_quality_section` template branch. Defaults to
+    `"general"` when no profile is present."""
+    p = session.get(Profile, symbol)
+    if p is None:
+        return "general"
+    return classify_stock_type(p.sector, p.industry)
+
+
+def _extract_raw(row: Any, *keys: str, default: Any = None) -> Any:
+    """Read the first non-None value found in `row.raw` for any of `keys`.
+
+    Helper for bank quality metrics whose inputs (`netInterestIncome`,
+    `nonInterestExpense`, ...) live in `income_statement.raw` rather
+    than as typed columns. Returns `default` when none of the keys are
+    populated.
+    """
+    raw = getattr(row, "raw", None) or {}
+    for k in keys:
+        v = raw.get(k)
+        if v is not None:
+            return v
+    return default
 
 
 def _safe_div(num: float | None, den: float | None) -> float | None:

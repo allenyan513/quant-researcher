@@ -146,6 +146,79 @@ def altman_z(
     }
 
 
+# ----- bank-specific scores (issue #37 phase 1) ---------------------------
+#
+# Piotroski / Altman / FCF-conversion / ROIC-WACC above are inapplicable
+# to financials. These five drop-in replacements are what the bundler's
+# bank template surfaces instead. All None-tolerant, no DB.
+
+
+def roa(net_income: float | None, total_assets: float | None) -> float | None:
+    """Return on assets — for banks this is the headline profitability
+    metric (~1% is healthy, 1.5%+ is strong, below 0.5% is weak)."""
+    if net_income is None or not total_assets:
+        return None
+    return net_income / total_assets
+
+
+def roe(net_income: float | None, total_equity: float | None) -> float | None:
+    """Return on (book) equity — typical bank target is 12-15%. ROE
+    above ROA × ~10 reflects deposit-funded leverage, not value
+    creation per se."""
+    if net_income is None or not total_equity:
+        return None
+    return net_income / total_equity
+
+
+def net_interest_margin(
+    net_interest_income: float | None, avg_earning_assets: float | None
+) -> float | None:
+    """NIM ≈ NII / avg earning assets.
+
+    Bank profitability per unit of interest-bearing balance sheet.
+    Note: the warehouse uses `(total_assets_curr + total_assets_prev) / 2`
+    as the denominator — a slight over-estimate of true earning assets
+    (which would exclude goodwill / PP&E / non-earning cash). The
+    bundler documents this. ~3%+ strong, ~2% middling, <1.5% weak.
+    """
+    if net_interest_income is None or not avg_earning_assets:
+        return None
+    return net_interest_income / avg_earning_assets
+
+
+def efficiency_ratio(
+    non_interest_expense: float | None,
+    net_interest_income: float | None,
+    non_interest_income: float | None,
+) -> float | None:
+    """Non-interest expense / (NII + non-interest income).
+
+    Standard bank cost-discipline metric. **Lower is better** —
+    <50% is exceptional (e.g. Wells in good years), 55-65% is the
+    big-bank norm, >70% suggests cost bloat or revenue pressure.
+    """
+    if non_interest_expense is None or net_interest_income is None or non_interest_income is None:
+        return None
+    revenue = net_interest_income + non_interest_income
+    if not revenue:
+        return None
+    return non_interest_expense / revenue
+
+
+def equity_to_assets(
+    total_equity: float | None, total_assets: float | None
+) -> float | None:
+    """Book leverage proxy — total_equity / total_assets.
+
+    Inverse of assets-to-equity leverage. ~10%+ is well-capitalized
+    for a large universal bank (rough proxy for the regulatory CET1
+    ratio, which isn't in the warehouse). Below 8% is thin.
+    """
+    if total_equity is None or not total_assets:
+        return None
+    return total_equity / total_assets
+
+
 # ----- internals ------------------------------------------------------------
 
 
