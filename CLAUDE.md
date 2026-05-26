@@ -158,8 +158,16 @@ def data_refresh(...) -> None:
   comfortable in Chinese). Code, comments, commits, and PR titles are always in
   **English** (for international readability).
 - **One PR per milestone**. Track subtasks with TaskCreate; don't split into many PRs.
-- **Ask before a PR**: wait for the maintainer's e2e confirmation before push /
-  opening a PR.
+- **E2E is Claude's job**: after implementing a change, run end-to-end verification
+  **yourself** — real CLI commands against the live DB / live integrations, not
+  just `pytest`. Examples that count as e2e: spot-check the affected `qr` command
+  on a couple of real symbols; compare typed columns against the source `raw`
+  blob; run a downstream consumer (`qr research bundle`, `qr value`, `qr morningcall`)
+  to confirm nothing crashes. Present a structured e2e report; the maintainer
+  decides whether to commit / open a PR based on it. **Do not wait** for them to
+  run the e2e themselves.
+- **Ask before a commit/PR**: with the e2e report in hand, still wait for the
+  maintainer's explicit go-ahead before `git commit` / `gh pr create`.
 - **Minimal diff (surgical)**: change only the lines the task requires. Don't
   "optimize" nearby code in passing, don't refactor what isn't broken, **match the
   existing style** (especially ported `engine/` code). Clean up only orphans **you**

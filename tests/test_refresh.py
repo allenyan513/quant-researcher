@@ -834,14 +834,26 @@ def test_refresh_ratios_key_metrics_402_marks_symbol_failed(
 
 
 def test_refresh_estimates_inserts_new_row(session: Session, fmp: MagicMock) -> None:
+    # Field names mirror FMP's actual /analyst-estimates payload (unprefixed
+    # `revenueAvg`, `epsAvg`, `numAnalystsRevenue`, ...) — see a live `raw`
+    # blob in the DB to confirm. A prior fixture-vs-real-FMP mismatch caused
+    # every numeric column to ingest NULL across 5000+ rows; this test now
+    # asserts ALL ten typed columns so the contract can't drift again.
     fmp.get_analyst_estimates.return_value = [
         {
             "symbol": "AAPL",
             "date": "2025-09-30",
             "period": "FY",
-            "estimatedRevenueAvg": 400.0,
-            "estimatedEpsAvg": 7.0,
-            "numberAnalystEstimatedRevenue": 12,
+            "revenueAvg": 400.0,
+            "revenueLow": 380.0,
+            "revenueHigh": 420.0,
+            "epsAvg": 7.0,
+            "epsLow": 6.5,
+            "epsHigh": 7.5,
+            "ebitdaAvg": 120.0,
+            "netIncomeAvg": 95.0,
+            "numAnalystsRevenue": 12,
+            "numAnalystsEps": 11,
         }
     ]
     result = refresh_estimates(session, fmp, ["AAPL"], periods=("annual",))
@@ -851,15 +863,22 @@ def test_refresh_estimates_inserts_new_row(session: Session, fmp: MagicMock) -> 
     row = session.get(AnalystEstimate, ("AAPL", date(2025, 9, 30), "FY"))
     assert row is not None
     assert row.revenue_avg == 400.0
+    assert row.revenue_low == 380.0
+    assert row.revenue_high == 420.0
     assert row.eps_avg == 7.0
+    assert row.eps_low == 6.5
+    assert row.eps_high == 7.5
+    assert row.ebitda_avg == 120.0
+    assert row.net_income_avg == 95.0
     assert row.num_analysts_revenue == 12
+    assert row.num_analysts_eps == 11
 
 
 def test_refresh_estimates_merge_revises_existing_row(
     session: Session, fmp: MagicMock
 ) -> None:
     fmp.get_analyst_estimates.return_value = [
-        {"symbol": "AAPL", "date": "2025-09-30", "period": "FY", "estimatedEpsAvg": 7.0}
+        {"symbol": "AAPL", "date": "2025-09-30", "period": "FY", "epsAvg": 7.0}
     ]
     refresh_estimates(session, fmp, ["AAPL"], periods=("annual",))
     session.commit()
@@ -868,7 +887,7 @@ def test_refresh_estimates_merge_revises_existing_row(
     # the default `only_stale=True` would correctly skip it. This test
     # exercises the merge/revision semantic itself.
     fmp.get_analyst_estimates.return_value = [
-        {"symbol": "AAPL", "date": "2025-09-30", "period": "FY", "estimatedEpsAvg": 7.5}
+        {"symbol": "AAPL", "date": "2025-09-30", "period": "FY", "epsAvg": 7.5}
     ]
     refresh_estimates(session, fmp, ["AAPL"], periods=("annual",), only_stale=False)
     session.commit()
@@ -942,7 +961,7 @@ def test_refresh_estimates_period_fallback_from_request(
     # FMP /analyst-estimates may omit `period` per row — we stamp from the
     # request param.
     fmp.get_analyst_estimates.return_value = [
-        {"symbol": "AAPL", "date": "2025-12-31", "estimatedEpsAvg": 1.8}
+        {"symbol": "AAPL", "date": "2025-12-31", "epsAvg": 1.8}
     ]
     refresh_estimates(session, fmp, ["AAPL"], periods=("quarter",))
     session.commit()
