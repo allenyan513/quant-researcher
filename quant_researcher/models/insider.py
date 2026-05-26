@@ -28,7 +28,13 @@ class InsiderTransaction(Base):
 
     filing_date: Mapped[date | None] = mapped_column(Date)
     transaction_date: Mapped[date | None] = mapped_column(Date)
-    insider: Mapped[str | None] = mapped_column(String(512))
+    # SEC Form 4 reporting-owner names can be a chain of related legal
+    # entities concatenated with " / " (e.g. a parent + ten subsidiary funds
+    # in one joint filing). 512 was the first fix; 335 chars at Goldman was
+    # the trigger, but private-equity / family-office joint filings can run
+    # much longer. Use Text — varchar(N) for a free-text concatenation
+    # field is just a future bug waiting to happen.
+    insider: Mapped[str | None] = mapped_column(Text)
     # SEC Form 4 officer titles can exceed varchar(256) at large issuers
     # (compound roles like "EVP, Global Head of X, Member of the Management
     # Committee"). Use Text to avoid arbitrary cliff cuts.
