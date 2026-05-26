@@ -9,12 +9,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from quant_researcher.db import Base
+from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
 from quant_researcher.valuation.helpers import (
     earnings_growth_rate,
+    forward_eps_growth_rate,
     historical_fcf,
     latest_close,
     latest_ebitda,
@@ -285,6 +287,110 @@ def test_earnings_growth_rate_none_when_negative_newest(session: Session) -> Non
         )
     session.commit()
     assert earnings_growth_rate(session, "Z", n=5) is None
+
+
+# ----- latest_ebitda ------------------------------------------------------
+
+
+# ----- forward_eps_growth_rate -------------------------------------------
+
+
+def test_forward_eps_growth_rate_basic(session: Session) -> None:
+    # Forward EPS doubles over 2 forward FYs → endpoint CAGR over 2 years
+    # equals 2 ** (1/2) - 1 ≈ 0.414.
+    today = date.today()
+    for i, eps in enumerate([10.0, 14.142, 20.0]):
+        session.add(
+            AnalystEstimate(
+                symbol="FWD",
+                period="FY",
+                fiscal_date=today + timedelta(days=365 * (i + 1)),
+                eps_avg=eps,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+    g = forward_eps_growth_rate(session, "FWD", n_periods=3)
+    assert g == pytest.approx((20.0 / 10.0) ** (1 / 2) - 1, rel=1e-3)
+
+
+def test_forward_eps_growth_rate_skips_past_fiscal_dates(session: Session) -> None:
+    # A past-dated estimate (FY already reported) must be excluded — using it
+    # would mix actuals-revisions with true forward consensus.
+    today = date.today()
+    session.add(
+        AnalystEstimate(
+            symbol="MIX",
+            period="FY",
+            fiscal_date=today - timedelta(days=180),
+            eps_avg=1.0,  # stale → must be filtered
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        AnalystEstimate(
+            symbol="MIX",
+            period="FY",
+            fiscal_date=today + timedelta(days=180),
+            eps_avg=10.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        AnalystEstimate(
+            symbol="MIX",
+            period="FY",
+            fiscal_date=today + timedelta(days=545),
+            eps_avg=12.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    g = forward_eps_growth_rate(session, "MIX", n_periods=3)
+    # If past row leaked in we'd compute 12/1 — instead should be 12/10.
+    assert g == pytest.approx(12.0 / 10.0 - 1, rel=1e-3)
+
+
+def test_forward_eps_growth_rate_none_when_fewer_than_two(session: Session) -> None:
+    session.add(
+        AnalystEstimate(
+            symbol="ONE",
+            period="FY",
+            fiscal_date=date.today() + timedelta(days=180),
+            eps_avg=5.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    assert forward_eps_growth_rate(session, "ONE") is None
+
+
+def test_forward_eps_growth_rate_none_on_non_positive_endpoint(
+    session: Session,
+) -> None:
+    # GS-style cyclical scenario where analysts model a near-term loss.
+    today = date.today()
+    session.add(
+        AnalystEstimate(
+            symbol="NEG",
+            period="FY",
+            fiscal_date=today + timedelta(days=180),
+            eps_avg=-0.5,  # forecast loss next FY → start non-positive
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        AnalystEstimate(
+            symbol="NEG",
+            period="FY",
+            fiscal_date=today + timedelta(days=545),
+            eps_avg=2.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    # CAGR is undefined when start is non-positive — fall back to historical.
+    assert forward_eps_growth_rate(session, "NEG") is None
 
 
 # ----- latest_ebitda ------------------------------------------------------

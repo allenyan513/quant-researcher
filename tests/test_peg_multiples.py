@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from quant_researcher.db import Base
+from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
@@ -62,7 +63,8 @@ def test_peg_value_missing_inputs() -> None:
 
 
 def test_value_via_peg_end_to_end(session: Session) -> None:
-    # Seed: 5y of net_income with steady 15% CAGR
+    # No forward estimates seeded → falls back to historical CAGR path.
+    # Seed: 5y of net_income with steady 15% CAGR.
     for i in range(5):
         session.add(
             IncomeStatement(
@@ -92,6 +94,75 @@ def test_value_via_peg_end_to_end(session: Session) -> None:
     assert out["current_price"] == 90.0
     # Upside negative (overpriced vs Lynch fair).
     assert out["upside_pct"] < 0
+    # Fallback path was used.
+    assert out["growth_source"] == "historical_cagr"
+
+
+def test_value_via_peg_prefers_forward_consensus_over_historical(
+    session: Session,
+) -> None:
+    # Seed historical growth at ~15% AND forward consensus at ~25%.
+    # Forward should win → fair_pe = 25, fair_price = 25 * 4 = $100.
+    for i in range(5):
+        session.add(
+            IncomeStatement(
+                symbol="DUAL",
+                period="FY",
+                fiscal_date=date(2020 + i, 9, 30),
+                net_income=100.0 * (1.15**i),
+                eps_diluted=4.0,
+                known_at=datetime.now(UTC),
+            )
+        )
+    # Forward FY+1 EPS $5.0 → FY+2 $6.25 → FY+3 $7.8125 (25% per year).
+    today = date.today()
+    for i, eps in enumerate([5.0, 6.25, 7.8125]):
+        session.add(
+            AnalystEstimate(
+                symbol="DUAL",
+                period="FY",
+                fiscal_date=today + timedelta(days=365 * (i + 1)),
+                eps_avg=eps,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.add(
+        FinancialRatios(
+            symbol="DUAL",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            pe_ratio=20.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(DailyPrice(symbol="DUAL", trade_date=date(2024, 9, 30), close=80.0))
+    session.commit()
+
+    out = value_via_peg(session, "DUAL")
+    assert out["growth_source"] == "forward_consensus"
+    # Forward growth ≈ 25% → fair_pe ≈ 25 → fair_price ≈ 25 * 4 = 100
+    # (NOT 15 * 4 = 60, which is what the historical path would give.)
+    assert out["fair_value_per_share"] == pytest.approx(25.0 * 4.0, rel=1e-3)
+
+
+def test_value_via_peg_growth_source_none_when_no_growth_available(
+    session: Session,
+) -> None:
+    # PE ratio present but neither forward estimates nor enough income history.
+    session.add(
+        FinancialRatios(
+            symbol="EMPTY",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            pe_ratio=15.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(DailyPrice(symbol="EMPTY", trade_date=date(2024, 9, 30), close=50.0))
+    session.commit()
+    out = value_via_peg(session, "EMPTY")
+    assert out["growth_source"] is None
+    assert out["fair_value_per_share"] is None
 
 
 # ----- multiples helpers --------------------------------------------------

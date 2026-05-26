@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from quant_researcher.db import Base
+from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import BalanceSheet, CashFlow, IncomeStatement
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
@@ -219,3 +220,58 @@ def test_valid_models_constant() -> None:
     assert "multiples" in VALID_MODELS
     assert "scenario" in VALID_MODELS
     assert "all" in VALID_MODELS
+
+
+# ----- forward-EPS growth source threading -------------------------------
+
+
+def test_dcf_uses_forward_eps_growth_when_available(session: Session) -> None:
+    # _seed_full_company doesn't seed AnalystEstimate, so the existing
+    # tests exercise the historical-FCF-CAGR fallback. Here we seed forward
+    # consensus and assert the DCF engine routes through it.
+    _seed_full_company(session)
+    today = date.today()
+    for i, eps in enumerate([6.5, 7.15, 7.865]):  # ~10%/yr forward CAGR
+        session.add(
+            AnalystEstimate(
+                symbol="AAPL",
+                period="FY",
+                fiscal_date=today + timedelta(days=365 * (i + 1)),
+                eps_avg=eps,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+    out = value_company(session, "AAPL", model="dcf")
+    assert out["models"]["dcf"]["growth_source"] == "forward_consensus"
+
+
+def test_dcf_falls_back_to_historical_fcf_when_no_estimates(
+    session: Session,
+) -> None:
+    # No AnalystEstimate rows → historical FCF CAGR remains the source.
+    _seed_full_company(session)
+    out = value_company(session, "AAPL", model="dcf")
+    assert out["models"]["dcf"]["growth_source"] == "historical_fcf_cagr"
+
+
+def test_dcf_user_override_growth_wins_over_forward(session: Session) -> None:
+    # User-supplied assumption is the top of the priority order — analyst
+    # consensus is informational, the user is authoritative.
+    _seed_full_company(session)
+    today = date.today()
+    for i, eps in enumerate([6.5, 7.15, 7.865]):
+        session.add(
+            AnalystEstimate(
+                symbol="AAPL",
+                period="FY",
+                fiscal_date=today + timedelta(days=365 * (i + 1)),
+                eps_avg=eps,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+    out = value_company(
+        session, "AAPL", model="dcf", assumptions={"growth_rate": 0.05}
+    )
+    assert out["models"]["dcf"]["growth_source"] == "user_override"
