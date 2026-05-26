@@ -27,6 +27,7 @@ from quant_researcher.valuation.dcf import (
     smoothed_base_fcf,
 )
 from quant_researcher.valuation.helpers import (
+    forward_eps_growth_rate,
     historical_fcf,
     latest_close,
     net_debt,
@@ -134,8 +135,20 @@ def _run_dcf(
         wacc_breakdown = {"wacc": wacc, "source": "user_override"}
 
     growth_rate = assumptions.get("growth_rate")
+    growth_source = "user_override" if growth_rate is not None else None
     if growth_rate is None:
-        growth_rate = default_growth_from_history(history) or 0.04
+        forward = forward_eps_growth_rate(session, symbol)
+        if forward is not None:
+            growth_rate = forward
+            growth_source = "forward_consensus"
+        else:
+            hist = default_growth_from_history(history)
+            if hist is not None:
+                growth_rate = hist
+                growth_source = "historical_fcf_cagr"
+            else:
+                growth_rate = 0.04
+                growth_source = "default_fallback"
     terminal_growth = assumptions.get("terminal_growth", 0.025)
     n_years = int(assumptions.get("n_years", 5))
 
@@ -207,6 +220,7 @@ def _run_dcf(
         "current_price": current,
         "upside_pct": upside,
         "history": history,
+        "growth_source": growth_source,
         "wacc_breakdown": wacc_breakdown,
         "core": {
             "enterprise_value": core["enterprise_value"],
@@ -290,8 +304,20 @@ def _run_scenario(
         )
 
     base_growth = assumptions.get("growth_rate")
+    growth_source = "user_override" if base_growth is not None else None
     if base_growth is None:
-        base_growth = default_growth_from_history(history) or 0.04
+        forward = forward_eps_growth_rate(session, symbol)
+        if forward is not None:
+            base_growth = forward
+            growth_source = "forward_consensus"
+        else:
+            hist = default_growth_from_history(history)
+            if hist is not None:
+                base_growth = hist
+                growth_source = "historical_fcf_cagr"
+            else:
+                base_growth = 0.04
+                growth_source = "default_fallback"
     terminal_growth = assumptions.get("terminal_growth", 0.025)
     n_years = int(assumptions.get("n_years", 5))
     shares = assumptions.get("shares") or shares_outstanding(session, symbol)
@@ -323,6 +349,7 @@ def _run_scenario(
         "current_price": current,
         "upside_pct": upside,
         "history": history,
+        "growth_source": growth_source,
         "scenarios": res["scenarios"],
         "weight_used": res["weight_used"],
     }
