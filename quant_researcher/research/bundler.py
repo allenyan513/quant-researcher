@@ -43,7 +43,7 @@ from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research import scores
-from quant_researcher.research.sector_classifier import classify_stock_type
+from quant_researcher.research.sector_classifier import classify_stock_type, net_revenue
 
 
 def build_bundle(
@@ -197,6 +197,14 @@ def _recent_statements(
         .order_by(model.fiscal_date.desc())  # type: ignore[attr-defined]
         .limit(n)
     ).all()
+    # Bank-aware: for IncomeStatement on a bank, augment each row with a
+    # `revenue_net` field (revenue − interestExpense). The raw `revenue`
+    # line stays — it's FMP-gross for banks and downstream readers may
+    # need both. For non-banks `revenue_net == revenue`, so we omit it
+    # to keep the payload minimal.
+    is_income = model is IncomeStatement
+    stock_type = _stock_type_for(session, symbol) if is_income else "general"
+
     out: list[dict[str, Any]] = []
     for row in rows:
         d = {
@@ -217,6 +225,8 @@ def _recent_statements(
             }:
                 continue
             d[col.name] = getattr(row, col.name)
+        if is_income and stock_type == "bank":
+            d["revenue_net"] = net_revenue(row, stock_type)
         out.append(d)
     return out
 

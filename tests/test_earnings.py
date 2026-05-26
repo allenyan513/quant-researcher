@@ -16,6 +16,7 @@ from quant_researcher.db import Base
 from quant_researcher.models.decisions import Decision
 from quant_researcher.models.estimates import AnalystEstimate
 from quant_researcher.models.financials import IncomeStatement
+from quant_researcher.models.profile import Profile
 from quant_researcher.research.earnings import read_earnings
 
 runner = CliRunner()
@@ -88,6 +89,65 @@ def test_read_earnings_thin_data(session: Session) -> None:
     out = read_earnings(session, "NOPE")
     assert out["periods_found"] == 0
     assert any("no financial statements" in n for n in out["notes"])
+
+
+def test_read_earnings_uses_net_revenue_for_banks(session: Session) -> None:
+    # Bank revenue surprise must compare net-vs-net (issue #36).
+    # FMP gross revenue 125 − interestExpense 67 = 58 (net). Estimate
+    # was 56 (net). Surprise = (58-56)/56*100 ≈ +3.57% — NOT +123%
+    # which is what the broken gross-vs-net comparison would give.
+    session.add_all([
+        Profile(
+            symbol="JPM",
+            sector="Financial Services",
+            industry="Banks - Diversified",
+            raw={},
+            known_at=datetime(2024, 11, 1, tzinfo=UTC),
+        ),
+        IncomeStatement(
+            symbol="JPM",
+            period="FY",
+            fiscal_date=date(2024, 12, 31),
+            revenue=125e9,
+            net_income=58e9,
+            eps_diluted=20.0,
+            eps=20.0,
+            known_at=datetime(2025, 2, 1, tzinfo=UTC),
+            raw={"interestExpense": 67e9},
+        ),
+        AnalystEstimate(
+            symbol="JPM",
+            fiscal_date=date(2024, 12, 31),
+            period="FY",
+            revenue_avg=56e9,
+            eps_avg=19.0,
+            num_analysts_eps=25,
+            known_at=datetime(2024, 6, 1, tzinfo=UTC),
+        ),
+    ])
+    session.commit()
+
+    out = read_earnings(session, "JPM")
+    fy = out["periods"][0]
+    # Revenue surprise computed on NET revenue (58) vs analyst (56).
+    assert fy["surprise"]["revenue_surprise_pct"] == pytest.approx(
+        (58e9 - 56e9) / 56e9 * 100, abs=0.01
+    )
+    # Sanity: would have been ~+123% under the broken gross-vs-net comparison.
+    assert fy["surprise"]["revenue_surprise_pct"] < 10  # clearly not the broken value
+    # `actual.revenue` keeps the raw FMP-gross line for transparency.
+    assert fy["actual"]["revenue"] == 125e9
+    # `actual.revenue_net` is the derived net number (only emitted for banks).
+    assert fy["actual"]["revenue_net"] == 58e9
+
+
+def test_read_earnings_general_stock_unaffected(session: Session) -> None:
+    # AAPL (non-bank) — Profile with sector=Technology, or no profile.
+    # Either way revenue_net must NOT be added (it would clutter the
+    # general-template output).
+    _seed(session)
+    out = read_earnings(session, "AAPL")
+    assert "revenue_net" not in out["periods"][0]["actual"]
 
 
 def test_read_earnings_includes_transcript_excerpt(session: Session) -> None:

@@ -58,6 +58,11 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
      revenue trend. Tier-1 / NPL are NOT in the warehouse — they're
      listed in `quality.missing_fields`; supplement from filings if
      needed for the report.
+   - **`income_statement_recent`** — for banks, each row additionally
+     carries `revenue_net` (revenue − interestExpense). FMP's `revenue`
+     for financials is gross (interestIncome + non-interest income);
+     analysts publish net. **For a bank, headline `revenue_net` in the
+     report — `revenue` is gross and will mislead.**
    - **`ratio_history`** — multi-year multiples + `latest_percentile_vs_history`
      (cheap/expensive vs the stock's own past)
    - `valuation_snapshots` · **`transcript`** (latest call: year / quarter /

@@ -16,7 +16,7 @@ historical path.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 StockType = Literal["bank", "general"]
 
@@ -71,3 +71,31 @@ def classify_stock_type(
         if sector == "Financial Services" and "Bank" in industry:
             return "bank"
     return "general"
+
+
+def net_revenue(income_row: Any, stock_type: StockType) -> float | None:
+    """Bank-aware revenue (issue #36).
+
+    For a bank, FMP's `/income-statement` `revenue` line is **gross**
+    (interestIncome + non-interest income) — sell-side analysts and
+    GAAP-style bank reporting use **net revenue** instead (gross −
+    interestExpense). Comparing gross actual to net consensus produces
+    the +111% / +144% revenue-surprise nonsense we saw on GS.
+
+    For `stock_type == "bank"` this returns
+    `revenue − interestExpense` derived from `income_row.raw`. For
+    everything else (and when interestExpense isn't in the raw blob)
+    it returns the unchanged `revenue` line — non-financials' gross
+    and net revenue are the same.
+    """
+    rev = getattr(income_row, "revenue", None)
+    if stock_type != "bank" or rev is None:
+        return rev
+    raw = getattr(income_row, "raw", None) or {}
+    int_exp = raw.get("interestExpense")
+    if int_exp is None:
+        return rev  # can't derive — keep gross rather than null
+    try:
+        return float(rev) - float(int_exp)
+    except (TypeError, ValueError):
+        return rev

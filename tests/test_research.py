@@ -479,14 +479,15 @@ def _seed_bank(session: Session, sym: str = "JPM") -> None:
     )
     rows = [
         # (year, net_income, total_assets, total_equity,
-        #  NII, non-int income, operating-expenses, interestIncome)
+        #  NII, non-int income, operating-expenses, interestIncome, interestExpense)
         # FMP's bank payload exposes `netInterestIncome` + `interestIncome`
-        # + `operatingExpenses`; `revenue` is bank-gross (II + non-II).
-        # Non-interest income is derived by the bundler as revenue - II.
-        (2023, 48e9, 3.8e12, 320e9, 90e9, 70e9, 88e9, 180e9),
-        (2024, 58e9, 4.0e12, 350e9, 95e9, 75e9, 90e9, 200e9),
+        # + `interestExpense` + `operatingExpenses`; `revenue` is bank-gross
+        # (II + non-II). Non-interest income is derived by the bundler as
+        # revenue − interestIncome; net revenue as revenue − interestExpense.
+        (2023, 48e9, 3.8e12, 320e9, 90e9, 70e9, 88e9, 180e9, 90e9),
+        (2024, 58e9, 4.0e12, 350e9, 95e9, 75e9, 90e9, 200e9, 105e9),
     ]
-    for yr, ni, ta, te, nii, non_int_inc, op_exp, int_inc in rows:
+    for yr, ni, ta, te, nii, non_int_inc, op_exp, int_inc, int_exp in rows:
         fd = date(yr, 12, 31)
         # gross revenue = interestIncome + nonInterestIncome
         gross_rev = int_inc + non_int_inc
@@ -501,6 +502,7 @@ def _seed_bank(session: Session, sym: str = "JPM") -> None:
                 raw={
                     "netInterestIncome": nii,
                     "interestIncome": int_inc,
+                    "interestExpense": int_exp,
                     "operatingExpenses": op_exp,
                 },
             )
@@ -540,6 +542,32 @@ def test_bundle_bank_scores_section_marks_piotroski_altman_na(
     # No general-template keys leak through.
     assert "piotroski_f" not in sc or sc.get("piotroski_f") is None
     assert "altman_z" not in sc or sc.get("altman_z") is None
+
+
+def test_bundle_bank_income_statement_carries_revenue_net(
+    session: Session,
+) -> None:
+    # Issue #36: for banks, `income_statement_recent[*]` must additively
+    # carry `revenue_net` (revenue − interestExpense) so downstream
+    # consumers don't accidentally headline FMP's gross revenue.
+    _seed_bank(session, "JPM")
+    p = build_bundle(session, "JPM")
+    inc = p["income_statement_recent"][0]  # FY2024 most-recent
+    # Gross revenue stays — it's what FMP reports.
+    assert inc["revenue"] == 200e9 + 75e9  # interestIncome + non-int income
+    # Net revenue = revenue − interestExpense = 275 − 105 = 170.
+    assert inc["revenue_net"] == 275e9 - 105e9
+
+
+def test_bundle_general_income_statement_omits_revenue_net(
+    session: Session,
+) -> None:
+    # AAPL (general): `revenue_net` would be redundant (gross == net) and
+    # must NOT be emitted — keeps the existing payload byte-for-byte.
+    _seed_two_years(session, "MSFT")
+    p = build_bundle(session, "MSFT")
+    inc = p["income_statement_recent"][0]
+    assert "revenue_net" not in inc
 
 
 def test_bundle_bank_quality_section_emits_bank_metrics(session: Session) -> None:
