@@ -44,9 +44,20 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
 2. `qr research bundle SYM` — the structured base. Read:
    - `profile` · `latest_price` · `ratios_latest_annual` (incl. `roic`,
      `earnings_yield`)
-   - **`scores`** — Piotroski F (x/9, with `missing` legs) + Altman **Z''** (zone)
-   - **`quality`** — `roic_wacc_spread`, `fcf_conversion`, `accruals_ratio`, and
-     multi-year `trends` (revenue / margins / ROIC)
+   - `profile.stock_type` — `"bank"` or `"general"`; drives the §4 / §5
+     report template fork below
+   - **`scores`** — `template == "general"`: Piotroski F (x/9, with `missing`
+     legs) + Altman **Z''** (zone). `template == "bank"`: both metrics are
+     in `not_applicable` (conceptually broken on a deposit-funded balance
+     sheet) — surface the `not_applicable_reason` honestly, don't try to
+     interpret a "distress zone" verdict.
+   - **`quality`** — `template == "general"`: `roic_wacc_spread`,
+     `fcf_conversion`, `accruals_ratio`, multi-year margin / ROIC /
+     revenue `trends`. `template == "bank"`: `roa` · `roe` ·
+     `net_interest_margin` · `efficiency_ratio` · `equity_to_assets` +
+     revenue trend. Tier-1 / NPL are NOT in the warehouse — they're
+     listed in `quality.missing_fields`; supplement from filings if
+     needed for the report.
    - **`ratio_history`** — multi-year multiples + `latest_percentile_vs_history`
      (cheap/expensive vs the stock's own past)
    - `valuation_snapshots` · **`transcript`** (latest call: year / quarter /
@@ -91,14 +102,32 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
    from `notes`; your current position if held.
 2. **Business & segments** — what drives revenue; TAM / growth drivers (web, cited).
 3. **Moat** — durability via Hamilton Helmer's 7 Powers; competitive threats (cited).
-4. **Financial quality** — ROIC vs WACC spread, FCF conversion, accruals, and
-   margin/ROIC/revenue **trends** (Phase 1 `quality`); Piotroski **x/9** + Altman
-   **Z'' zone** — name any `missing` Piotroski legs honestly.
-5. **Valuation** — lead with the **reverse-DCF expectations gap** ("price implies
-   ~X% growth vs ~Y% assumed / historical") and the **scenario bull/base/bear**
-   band; multiples **vs the stock's own history** (percentile) and vs peers. The
-   forward-DCF point estimate runs on default assumptions and is unreliable — do
-   **not** feature it; present valuation via the reverse read + scenario band.
+4. **Financial quality** — branch on `profile.stock_type`:
+   - **`general`** (default): ROIC vs WACC spread, FCF conversion, accruals,
+     multi-year margin / ROIC / revenue **trends** (Phase 1 `quality`);
+     Piotroski **x/9** + Altman **Z'' zone** — name any `missing` Piotroski
+     legs honestly.
+   - **`bank`**: ROA (~1%+ healthy) · ROE (~12-15% target) · Net Interest
+     Margin (the warehouse uses total-assets as a proxy denominator for
+     earning assets — slight over-estimate; ~3%+ strong) · Efficiency Ratio
+     (lower better; <50% exceptional, 55-65% norm, >70% weak) · Equity /
+     Assets (leverage proxy; ~10%+ well-capitalized). Do NOT cite Piotroski
+     / Altman / FCF-conversion / ROIC-WACC for a bank — the bundle lists
+     them in `not_applicable` with a reason. Surface `missing_fields`
+     (Tier-1 / NPL) and supplement from filings only if the report needs them.
+5. **Valuation** — branch on `profile.stock_type`:
+   - **`general`** (default): lead with the **reverse-DCF expectations gap**
+     ("price implies ~X% growth vs ~Y% assumed / historical") and the
+     **scenario bull/base/bear** band; multiples **vs the stock's own
+     history** (percentile) and vs peers. The forward-DCF point estimate
+     runs on default assumptions and is unreliable — do **not** feature it.
+   - **`bank`**: lead with **P/TBV** (book value ≈ tangible book for banks
+     at scale — use `ratios_latest_annual.price_to_book`) + **PE vs own
+     history** (percentile) + dividend yield. DCF on a bank degenerates
+     ("no positive historical FCF") and the bundle reflects this — do NOT
+     feature the DCF number; cite the warehouse `note` verbatim if present.
+     EV/EBITDA is sector-gated and returns null for banks (deposits would
+     blow up the equity bridge).
 6. **Management & capital allocation** — buybacks / dividends / M&A; **transcript
    guidance + Q&A highlights** (Phase 3 — cite the specific call).
 7. **Catalysts** — near-term events + the next earnings date (cited).

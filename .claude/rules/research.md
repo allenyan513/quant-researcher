@@ -76,3 +76,32 @@ so a past period only has one if it was captured "while it was still forward" �
 historical surprise is **sparse**; `estimate_available` / `estimates_matched` make
 coverage explicit and never imply a beat/miss when there's no estimate. `--transcript`
 fetches online (402-safe).
+
+## Sector-aware report templates (issue #37, phase 1: banks)
+
+`research/sector_classifier.py` `classify_stock_type(sector, industry)` maps a
+symbol to a `StockType` literal — `"bank"` or `"general"` in phase 1. The
+bundler surfaces the result as `profile.stock_type` and uses it to dispatch the
+`scores` and `quality` blocks into per-template shapes (distinguished by a
+`"template": "bank" | "general"` discriminator field on each block).
+
+Bank template payload:
+- `scores`: Piotroski / Altman listed in `not_applicable` with a `not_applicable_reason`.
+- `quality`: `roa` · `roe` · `net_interest_margin` · `efficiency_ratio` ·
+  `equity_to_assets` + revenue `trend`. `missing_fields` lists Tier-1 / NPL
+  (not in FMP standard endpoints — supplement from filings if needed). NIM
+  denominator is `(total_assets_curr + total_assets_prev) / 2` as a proxy
+  for true earning assets; the over-estimate is documented in the
+  `scores.net_interest_margin` docstring.
+- Bank metrics read `netInterestIncome` / `nonInterestIncome` /
+  `nonInterestExpense` from `income_statement.raw` via the bundler's
+  `_extract_raw` helper — these are real FMP fields for financial issuers,
+  just not promoted to typed columns.
+
+General template payload is unchanged from before #37, except for the
+additive `"template": "general"` key so downstream consumers can dispatch
+without probing for `piotroski_f`.
+
+REIT / Insurance / Utility are deferred — adding them is a one-set change to
+`BANK_INDUSTRIES` / new mapping tables in `sector_classifier.py` + one more
+template branch in `_scores_section` / `_quality_section`.

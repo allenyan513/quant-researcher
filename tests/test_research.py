@@ -439,6 +439,135 @@ def test_bundle_scores_none_when_no_financials(session: Session) -> None:
     assert p["ratio_history"] is None
 
 
+def test_bundle_general_template_emits_template_keys(session: Session) -> None:
+    # Existing general path (Tech): the historical Piotroski / Altman /
+    # ROIC-WACC computation is preserved. Issue #37 only adds the
+    # `template: "general"` discriminator + `stock_type: "general"` on
+    # profile, alongside the existing keys.
+    _seed_two_years(session, "MSFT")
+    p = build_bundle(session, "MSFT")
+    assert p["profile"]["stock_type"] == "general"
+    assert p["scores"]["template"] == "general"
+    assert p["scores"]["piotroski_f"]["score"] == 9  # unchanged
+    assert p["quality"]["template"] == "general"
+    assert "roic_wacc_spread" in p["quality"]      # unchanged
+    assert "net_interest_margin" not in p["quality"]
+
+
+# ----- bank template (issue #37 phase 1) ---------------------------------
+
+
+def _seed_bank(session: Session, sym: str = "JPM") -> None:
+    """Two FY years of bank financials. Sector / industry mark it as a bank.
+
+    The raw JSON carries the bank-specific FMP fields (`netInterestIncome`
+    / `nonInterestIncome` / `nonInterestExpense`) that aren't typed
+    columns but are present in real FMP payloads (confirmed for GS).
+    """
+    session.add(
+        Profile(
+            symbol=sym,
+            sector="Financial Services",
+            industry="Banks—Diversified",
+            beta=1.2,
+            raw={"marketCap": 600e9},
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.add(
+        DailyPrice(symbol=sym, trade_date=date.today() - timedelta(days=1), close=200.0)
+    )
+    rows = [
+        # (year, net_income, total_assets, total_equity,
+        #  NII, non-int income, operating-expenses, interestIncome)
+        # FMP's bank payload exposes `netInterestIncome` + `interestIncome`
+        # + `operatingExpenses`; `revenue` is bank-gross (II + non-II).
+        # Non-interest income is derived by the bundler as revenue - II.
+        (2023, 48e9, 3.8e12, 320e9, 90e9, 70e9, 88e9, 180e9),
+        (2024, 58e9, 4.0e12, 350e9, 95e9, 75e9, 90e9, 200e9),
+    ]
+    for yr, ni, ta, te, nii, non_int_inc, op_exp, int_inc in rows:
+        fd = date(yr, 12, 31)
+        # gross revenue = interestIncome + nonInterestIncome
+        gross_rev = int_inc + non_int_inc
+        session.add(
+            IncomeStatement(
+                symbol=sym,
+                period="FY",
+                fiscal_date=fd,
+                net_income=ni,
+                revenue=gross_rev,
+                known_at=datetime.now(UTC),
+                raw={
+                    "netInterestIncome": nii,
+                    "interestIncome": int_inc,
+                    "operatingExpenses": op_exp,
+                },
+            )
+        )
+        session.add(
+            BalanceSheet(
+                symbol=sym,
+                period="FY",
+                fiscal_date=fd,
+                total_assets=ta,
+                total_equity=te,
+                total_liabilities=ta - te,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+
+
+def test_bundle_bank_profile_classified_correctly(session: Session) -> None:
+    _seed_bank(session, "JPM")
+    p = build_bundle(session, "JPM")
+    assert p["profile"]["stock_type"] == "bank"
+    assert p["profile"]["sector"] == "Financial Services"
+    assert p["profile"]["industry"] == "Banks—Diversified"
+
+
+def test_bundle_bank_scores_section_marks_piotroski_altman_na(
+    session: Session,
+) -> None:
+    _seed_bank(session, "JPM")
+    p = build_bundle(session, "JPM")
+    sc = p["scores"]
+    assert sc["template"] == "bank"
+    assert "piotroski_f" in sc["not_applicable"]
+    assert "altman_z" in sc["not_applicable"]
+    assert "non-financial balance sheet" in sc["not_applicable_reason"]
+    # No general-template keys leak through.
+    assert "piotroski_f" not in sc or sc.get("piotroski_f") is None
+    assert "altman_z" not in sc or sc.get("altman_z") is None
+
+
+def test_bundle_bank_quality_section_emits_bank_metrics(session: Session) -> None:
+    _seed_bank(session, "JPM")
+    p = build_bundle(session, "JPM")
+    q = p["quality"]
+    assert q["template"] == "bank"
+    # FY24 values from the seed:
+    #   ROA = 58e9 / 4.0e12 = 0.0145
+    #   ROE = 58e9 / 350e9  ≈ 0.1657
+    #   NIM = 95e9 / ((4.0e12 + 3.8e12) / 2) = 95 / 3900 ≈ 0.02436
+    #   Efficiency = 90 / (95 + 75) = 90 / 170 ≈ 0.5294
+    #   Equity/Assets = 350e9 / 4.0e12 = 0.0875
+    assert q["roa"] == pytest.approx(58e9 / 4.0e12)
+    assert q["roe"] == pytest.approx(58e9 / 350e9)
+    assert q["net_interest_margin"] == pytest.approx(95e9 / ((4.0e12 + 3.8e12) / 2))
+    assert q["efficiency_ratio"] == pytest.approx(90.0 / (95.0 + 75.0))
+    assert q["equity_to_assets"] == pytest.approx(350e9 / 4.0e12)
+    # Revenue trend still meaningful for banks (total revenue is well-defined).
+    assert q["trends"]["revenue"]["direction"] == "up"
+    # Honest about what's missing.
+    assert "tier_1_capital_ratio" in q["missing_fields"]
+    assert "npl_ratio" in q["missing_fields"]
+    # And about what's not applicable.
+    assert "roic_wacc_spread" in q["not_applicable"]
+    assert "fcf_conversion" in q["not_applicable"]
+
+
 def test_bundle_holdings_picks_latest_per_account(session: Session) -> None:
     """Multiple snapshots per (account, symbol) → bundle takes the most recent per account."""
     sym = "AAPL"
