@@ -70,6 +70,18 @@ stdout — `{ok, data, as_of, data_freshness, code_version, error}` — exit 0 =
   judgment, and recommendation are yours. Don't dump raw envelopes at the human.
 - **Reproducibility.** `qr ledger add` snapshots the data behind a decision; cite
   `snapshot_id` / `as_of` so the call can be replayed and graded later.
+- **Reports go to `~/qr-reports/`, not `/tmp`.** Any generated HTML / PDF deep-dive
+  the maintainer might want to keep — deep-research reports, comparison docs,
+  sell-put briefs, post-mortems — is written to
+  `~/qr-reports/{TICKER}/{YYYY-MM-DD}-{TICKER}-{type}.html` so it survives
+  shell restarts. Types in use: `deep-dive` (standard skill output),
+  `comparison` (before/after a fix), `sell-put` / `sell-call` (options-overlay
+  variant), `morning-call` (pre-open snapshot). Create the per-ticker
+  subdirectory if missing. Append a row to `~/qr-reports/INDEX.md` with the
+  date / ticker / type / one-line thesis / link so the maintainer can scan
+  the catalog without crawling the tree. Throwaway scratch (audit scripts,
+  /tmp jq one-liners) still goes to `/tmp`; only the keeper artifacts go to
+  `~/qr-reports/`.
 
 ## Commands
 
