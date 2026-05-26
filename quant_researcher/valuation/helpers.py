@@ -80,7 +80,15 @@ def shares_outstanding(session: Session, symbol: str) -> float | None:
         mcap = raw.get("mktCap") or raw.get("marketCap")
         price = raw.get("price")
         try:
-            if mcap is not None and price is not None and float(price) > 0:
+            # Both must be strictly positive — a zero/negative mcap from
+            # corrupted or just-listed-pre-trading data would otherwise
+            # propagate zero/negative shares to downstream per-share math.
+            if (
+                mcap is not None
+                and price is not None
+                and float(price) > 0
+                and float(mcap) > 0
+            ):
                 return float(mcap) / float(price)
         except (TypeError, ValueError):
             pass  # fall through to EPS-based fallback

@@ -241,6 +241,34 @@ def test_shares_outstanding_falls_back_when_profile_lacks_price(
     assert shares_outstanding(session, "NOPRICE") == pytest.approx(10e9 / 5.0)
 
 
+def test_shares_outstanding_falls_back_when_profile_mcap_non_positive(
+    session: Session,
+) -> None:
+    # Corrupted / just-listed-pre-trading profile shows mcap = 0. The primary
+    # path must reject this and fall back to EPS — propagating zero shares
+    # would corrupt every per-share denominator downstream.
+    session.add(
+        Profile(
+            symbol="ZEROMCAP",
+            known_at=datetime.now(UTC),
+            raw={"symbol": "ZEROMCAP", "marketCap": 0, "price": 50.0},
+        )
+    )
+    session.add(
+        IncomeStatement(
+            symbol="ZEROMCAP",
+            period="FY",
+            fiscal_date=date(2024, 12, 31),
+            net_income=200e6,
+            eps_diluted=2.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    # Falls back to EPS path: 200M / 2.0 = 100M shares (not 0 from mcap/price).
+    assert shares_outstanding(session, "ZEROMCAP") == pytest.approx(100e6)
+
+
 # ----- latest_close / market_cap -----------------------------------------
 
 
