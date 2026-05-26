@@ -62,11 +62,29 @@ def latest_ratios(session: Session, symbol: str) -> FinancialRatios | None:
 
 
 def shares_outstanding(session: Session, symbol: str) -> float | None:
-    """Compute diluted share count from latest FY `net_income / eps_diluted`.
+    """Derive shares outstanding, preferring the freshest source.
 
-    Returns None if either field is missing or eps_diluted is zero. We don't
-    persist shares outstanding as its own column (yet).
+    Primary: `profile.raw.marketCap / profile.raw.price` — both come from
+    FMP's `/profile` endpoint, refreshed together on each profile pull, so
+    the ratio is definitionally the current implied share count.
+
+    Fallback: latest-FY `net_income / eps_diluted` — used only when the
+    profile is missing or lacks marketCap/price. Buyback-heavy names drift
+    materially against this fallback within a fiscal year because the EPS
+    denominator is averaged over the period.
+
+    Returns None when neither path resolves.
     """
+    raw = session.scalar(select(Profile.raw).where(Profile.symbol == symbol))
+    if raw:
+        mcap = raw.get("mktCap") or raw.get("marketCap")
+        price = raw.get("price")
+        try:
+            if mcap is not None and price is not None and float(price) > 0:
+                return float(mcap) / float(price)
+        except (TypeError, ValueError):
+            pass  # fall through to EPS-based fallback
+
     inc = latest_income_statement(session, symbol)
     if inc is None or inc.net_income is None or inc.eps_diluted in (None, 0):
         return None

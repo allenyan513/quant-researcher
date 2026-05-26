@@ -168,6 +168,79 @@ def test_shares_outstanding_none_when_eps_zero(session: Session) -> None:
     assert shares_outstanding(session, "X") is None
 
 
+def test_shares_outstanding_prefers_profile_market_cap_over_eps(
+    session: Session,
+) -> None:
+    # When `/profile` carries marketCap + price, that ratio is the freshest
+    # share count we have (refreshed nightly with the price). Even if the
+    # latest FY income statement implies a different share count (typical
+    # for buyback-heavy names where the fiscal-year average EPS lags the
+    # current share count), the profile-derived value wins.
+    session.add(
+        Profile(
+            symbol="BUYBACK",
+            known_at=datetime.now(UTC),
+            raw={"symbol": "BUYBACK", "marketCap": 294e9, "price": 1000.0},
+        )
+    )
+    session.add(
+        IncomeStatement(
+            symbol="BUYBACK",
+            period="FY",
+            fiscal_date=date(2025, 12, 31),
+            net_income=17.176e9,
+            eps_diluted=51.32,  # → EPS path would give 334.7M shares (stale)
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    # profile path: 294e9 / 1000 = 294M (current, post-buyback)
+    assert shares_outstanding(session, "BUYBACK") == pytest.approx(294e6)
+
+
+def test_shares_outstanding_falls_back_to_eps_when_profile_missing(
+    session: Session,
+) -> None:
+    # No Profile row → fall back to net_income / eps_diluted (legacy path).
+    session.add(
+        IncomeStatement(
+            symbol="LEGACY",
+            period="FY",
+            fiscal_date=date(2024, 9, 30),
+            net_income=100e9,
+            eps_diluted=6.5,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    assert shares_outstanding(session, "LEGACY") == pytest.approx(100e9 / 6.5)
+
+
+def test_shares_outstanding_falls_back_when_profile_lacks_price(
+    session: Session,
+) -> None:
+    # Profile present but missing price → can't derive ratio, fall back.
+    session.add(
+        Profile(
+            symbol="NOPRICE",
+            known_at=datetime.now(UTC),
+            raw={"symbol": "NOPRICE", "marketCap": 100e9},  # price missing
+        )
+    )
+    session.add(
+        IncomeStatement(
+            symbol="NOPRICE",
+            period="FY",
+            fiscal_date=date(2024, 12, 31),
+            net_income=10e9,
+            eps_diluted=5.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    assert shares_outstanding(session, "NOPRICE") == pytest.approx(10e9 / 5.0)
+
+
 # ----- latest_close / market_cap -----------------------------------------
 
 
