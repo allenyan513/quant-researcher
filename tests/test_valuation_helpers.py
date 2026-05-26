@@ -393,6 +393,39 @@ def test_forward_eps_growth_rate_none_on_non_positive_endpoint(
     assert forward_eps_growth_rate(session, "NEG") is None
 
 
+def test_forward_eps_growth_rate_uses_actual_year_span_on_gaps(
+    session: Session,
+) -> None:
+    # Far-out analyst coverage drops off: FY+1 and FY+3 are present, FY+2 is
+    # gone. The CAGR must be computed over the actual 2-year span, NOT over
+    # `len(series) - 1 = 1` — that would double the implied growth.
+    today = date.today()
+    session.add(
+        AnalystEstimate(
+            symbol="GAP",
+            period="FY",
+            fiscal_date=today + timedelta(days=365),
+            eps_avg=10.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    # FY+2 missing on purpose.
+    session.add(
+        AnalystEstimate(
+            symbol="GAP",
+            period="FY",
+            fiscal_date=today + timedelta(days=365 * 3),
+            eps_avg=14.4,  # 20% CAGR over 2 years ⇒ 10 × 1.2^2 = 14.4
+            known_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+    g = forward_eps_growth_rate(session, "GAP", n_periods=3)
+    # Length-based years=1 would give 44% (14.4/10 - 1); the correct
+    # answer is 20% over the real 2-year span.
+    assert g == pytest.approx(0.20, rel=1e-2)
+
+
 # ----- latest_ebitda ------------------------------------------------------
 
 

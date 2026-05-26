@@ -201,6 +201,11 @@ def forward_eps_growth_rate(
     want a different convention can pass `growth_rate` via `assumptions`.
     For strong mean-reverting cyclicals the endpoint CAGR understates
     cycle-peak earnings — documented limitation; still beats backward CAGR.
+
+    The year span between endpoints is computed from `fiscal_date` itself,
+    not from row count — so a coverage gap (e.g. FY26 + FY28 with FY27
+    missing because analyst coverage dropped) correctly yields a 2-year
+    span, not a 1-year span (which would overstate the CAGR).
     """
     rows = session.execute(
         select(AnalystEstimate.fiscal_date, AnalystEstimate.eps_avg)
@@ -213,12 +218,16 @@ def forward_eps_growth_rate(
         .order_by(AnalystEstimate.fiscal_date.asc())
         .limit(n_periods)
     ).all()
-    series = [float(eps) for _d, eps in rows if eps is not None]
-    if len(series) < 2 or series[0] <= 0 or series[-1] <= 0:
+    points = [(d, float(eps)) for d, eps in rows if d is not None and eps is not None]
+    if len(points) < 2 or points[0][1] <= 0 or points[-1][1] <= 0:
         return None
-    years = len(series) - 1
+    first_date, first_eps = points[0]
+    last_date, last_eps = points[-1]
+    years = (last_date - first_date).days / 365.25
+    if years <= 0:
+        return None  # defensive: monotonic asc + >= today should prevent it
     try:
-        return (series[-1] / series[0]) ** (1 / years) - 1
+        return (last_eps / first_eps) ** (1 / years) - 1
     except (ValueError, ZeroDivisionError):
         return None
 

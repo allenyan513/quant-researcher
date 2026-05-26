@@ -275,3 +275,48 @@ def test_dcf_user_override_growth_wins_over_forward(session: Session) -> None:
         session, "AAPL", model="dcf", assumptions={"growth_rate": 0.05}
     )
     assert out["models"]["dcf"]["growth_source"] == "user_override"
+
+
+def test_dcf_growth_source_default_fallback_labeled_correctly(
+    session: Session,
+) -> None:
+    # When both forward consensus and historical FCF CAGR are unavailable,
+    # the model uses the hardcoded 0.04 default. growth_source must read
+    # "default_fallback" — labeling it "historical_fcf_cagr" would lie
+    # about the provenance of the input.
+    #
+    # Setup: smoothed_base_fcf must be positive (DCF actually runs),
+    # but default_growth_from_history must return None (start endpoint <= 0).
+    # Recipe: 5 FCF observations oldest→newest = [-1.0, 5.0, 6.0, 7.0, 8.0]
+    # → median of last 3 = 7.0 (positive base_fcf)
+    # → start=-1 → default_growth_from_history returns None.
+    session.add(
+        Profile(
+            symbol="DFB", sector="Tech", beta=1.0, raw={}, known_at=datetime.now(UTC)
+        )
+    )
+    session.add(
+        IncomeStatement(
+            symbol="DFB",
+            period="FY",
+            fiscal_date=date(2024, 12, 31),
+            net_income=1e9,
+            eps_diluted=5.0,
+            known_at=datetime.now(UTC),
+        )
+    )
+    for i, fcf in enumerate([-1.0, 5.0, 6.0, 7.0, 8.0]):  # oldest→newest
+        session.add(
+            CashFlow(
+                symbol="DFB",
+                period="FY",
+                fiscal_date=date(2020 + i, 12, 31),
+                free_cash_flow=fcf,
+                known_at=datetime.now(UTC),
+            )
+        )
+    session.commit()
+    out = value_company(session, "DFB", model="dcf")
+    assert out["models"]["dcf"]["growth_source"] == "default_fallback"
+    assumptions = out["models"]["dcf"]["core"]["assumptions"]
+    assert assumptions["growth_rate"] == 0.04

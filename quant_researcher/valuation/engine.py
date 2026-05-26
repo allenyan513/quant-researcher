@@ -142,8 +142,13 @@ def _run_dcf(
             growth_rate = forward
             growth_source = "forward_consensus"
         else:
-            growth_rate = default_growth_from_history(history) or 0.04
-            growth_source = "historical_fcf_cagr"
+            hist = default_growth_from_history(history)
+            if hist is not None:
+                growth_rate = hist
+                growth_source = "historical_fcf_cagr"
+            else:
+                growth_rate = 0.04
+                growth_source = "default_fallback"
     terminal_growth = assumptions.get("terminal_growth", 0.025)
     n_years = int(assumptions.get("n_years", 5))
 
@@ -306,8 +311,13 @@ def _run_scenario(
             base_growth = forward
             growth_source = "forward_consensus"
         else:
-            base_growth = default_growth_from_history(history) or 0.04
-            growth_source = "historical_fcf_cagr"
+            hist = default_growth_from_history(history)
+            if hist is not None:
+                base_growth = hist
+                growth_source = "historical_fcf_cagr"
+            else:
+                base_growth = 0.04
+                growth_source = "default_fallback"
     terminal_growth = assumptions.get("terminal_growth", 0.025)
     n_years = int(assumptions.get("n_years", 5))
     shares = assumptions.get("shares") or shares_outstanding(session, symbol)
