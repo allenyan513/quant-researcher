@@ -176,3 +176,20 @@ def data_refresh(...) -> None:
 - **Simplicity first**: the least code that solves the problem; no beyond-requirement
   features, no abstraction for needs that haven't arrived, no error handling for
   impossible cases. Ask yourself "would a senior engineer think this is over-engineered?".
+- **File incidental findings as GitHub issues**: while working on the assigned task,
+  if you stumble on a real bug or a worthwhile optimization that's **out of scope**
+  for the current change, capture it as a GitHub issue on `allenyan513/quant-researcher`
+  instead of silently fixing it (violates "Minimal diff") or losing it in chat scrollback.
+  - **What qualifies**: actual bugs (wrong output, crash, contract violation), perf
+    issues with concrete impact, missing test coverage on a real risk surface,
+    duplicated logic that's already biting. **Does NOT qualify**: style nits,
+    speculative refactors, "nice-to-have" features without a triggering pain point,
+    anything already tracked.
+  - **Ask first, then file**: surface the finding in chat with a one-line title +
+    why-it-matters and ask the maintainer to confirm before calling `mcp__github__issue_write`.
+    Batch multiple findings into one confirmation prompt rather than asking N times.
+  - **Required context in the issue body**: (1) where — `file:line` or `qr <cmd>`
+    repro; (2) what's wrong / what's the win; (3) how you found it (the task /
+    PR / commit that surfaced it); (4) suggested fix sketch if obvious, otherwise
+    "needs investigation". Label with `claude-found` (create the label if missing)
+    so the maintainer can filter.
