@@ -71,6 +71,12 @@ Each `qr` command prints exactly one JSON envelope; parse it, check `ok`, read
      Form 4 open-market buy/sell tally + notable trades) · **`short_interest`**
      (days-to-cover, short shares, Δ vs prior) · `news` · `holdings`
      (your position + cost basis, if any)
+   - **`technical`** — ~1y price-action / SMA trend / RSI / MACD / volume
+     snapshot plus a `signal_summary` (trend_bias · momentum_bias · macd_bias
+     · near_52w_extreme). `null` when no daily_prices; `{"insufficient_data":
+     true, "bars": N}` when N < 50 (rare — new IPO / freshly added to
+     universe). Use this for §10 (tactical timing) only, **not** as a
+     primary signal.
    - Any section is `null` when its data is missing — say so, don't invent it.
 3. `qr earnings SYM` — actual-vs-estimate EPS/revenue surprise (only where an
    estimate exists — historical surprise is **sparse**; never imply a beat/miss
@@ -142,7 +148,31 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
    (`insider`: open-market buys vs sells, notable Form 4s) + **short interest**
    (`short_interest`: days-to-cover, short shares, Δ vs prior). 13F institutional
    ownership isn't ingested yet → source from the web if relevant (cited).
-10. **Thesis & recommendation** — bull / base / bear and your conviction. Offer to
+10. **Technical context / tactical timing** (supporting, **not** the primary
+    signal) — read `bundle.technical`. Lead with the `signal_summary` line
+    (e.g. *"trend up · momentum neutral · MACD bullish · not near 52w
+    extreme"*); then a compact table of the three indicator groups:
+    - **Trend**: SMA 20 / 50 / 200 with current price's % offset from each;
+      the most recent 50/200 golden- or death-cross date (full-window
+      lookback — these are rare events); most recent 20/50 cross within
+      the last 60 trading days.
+    - **Momentum**: RSI(14) latest + zone (oversold < 30 / neutral /
+      overbought > 70); count of oversold / overbought touches in the last
+      60 trading days.
+    - **MACD**: line / signal / histogram + most recent 60-day golden /
+      death cross.
+    - **Volume**: 20-day avg vs latest, plus any volume-spike days
+      (> 2× avg) in the last 30 — call these out **with the news
+      headline** from `bundle.news` near that date when there's an obvious
+      coincidence.
+    If `trend_bias` / `momentum_bias` / `macd_bias` align on the same side,
+    say so plainly ("three-way bullish confluence"); if they disagree, name
+    the divergence. **Frame any read as timing context for the basics-driven
+    thesis** — *if* the basics already justify a buy, technicals tell you
+    *when*; they do not override §4 quality or §5 valuation. If
+    `bundle.technical` is `null` or `insufficient_data`, write one line
+    that explains why and move on — do not improvise indicators.
+11. **Thesis & recommendation** — bull / base / bear and your conviction. Offer to
     record it: `qr ledger add SYM --side buy|sell --thesis "…" --confidence N`,
     citing the valuation `snapshot_id` so forward alpha can be graded later.
 
@@ -156,6 +186,12 @@ Write a scannable, institutional-style deep dive **directly in the chat**. Do
 - **Reverse DCF is the value-investor headline** (what growth the price bakes in).
   The plain forward DCF on default assumptions is unreliable — present valuation
   through the reverse read + the scenario band, not a single point estimate.
+- **Technical signals are supporting context, not the thesis.** Use
+  `bundle.technical` to answer *"if I were going to act on the basics, what's
+  the tape saying about timing?"* — never to override the §4 quality / §5
+  valuation read. When technicals and fundamentals point opposite ways, the
+  fundamentals win and the divergence becomes a §10 observation, not a
+  recommendation flip.
 - **Be honest about coverage.** Surface `notes` from `qr earnings` / `qr value`
   verbatim; flag any `null` bundle section as missing data; name `missing`
   Piotroski legs; flag sparse earnings surprise; note the transcript `call_date`
