@@ -53,6 +53,16 @@ def import_holdings(
     if not payload:
         raise ValueError("payload is empty")
 
+    # Flex returns one `<OpenPosition>` per tax lot — a position split across N
+    # lots arrives as N rows with the same (accountId, symbol, reportDate). The
+    # warehouse stores one row per (account, symbol, as_of_date), so we collapse
+    # lots into a single position row before mapping. Skipping this step makes
+    # `session.merge` overwrite N times and only the last lot survives — a real
+    # bug that silently understated positions like TSLA (11 lots → 80 shares
+    # collapsed to "10 shares" because the last lot happened to be 10).
+    if source == "flex":
+        payload = _collapse_flex_lots(payload)
+
     mapped: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for i, raw in enumerate(payload):
@@ -84,6 +94,133 @@ def import_holdings(
         symbols=sorted({r["symbol"] for r in mapped}),
         skipped=skipped,
     )
+
+
+def _collapse_flex_lots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce IBKR Flex `<OpenPosition>` rows to one row per position key.
+
+    Per position key `(accountId, symbol, reportDate)`, a Flex Live-Positions
+    response can contain:
+      1. A single row — the simple case, pass through.
+      2. One SUMMARY row plus N LOT rows — when the Flex Query has lot
+         detail enabled. The SUMMARY's `position` already equals Σ(LOT
+         positions) and `costBasisPrice` is already the weighted avg; we
+         **keep the SUMMARY** and drop the lots (taking IBKR's own
+         aggregation is more trustworthy than re-deriving it).
+      3. Only LOT rows (no summary) — older / minimal queries. We aggregate
+         them ourselves: positions summed; cost = Σ(costBasisMoney) / Σ(qty)
+         with a position-weighted-mean fallback if `costBasisMoney` is
+         missing; other numeric fields summed; categorical fields taken
+         from the first row; side re-derived from the signed total.
+
+    Detection ladder:
+      • `levelOfDetail` attribute (`"SUMMARY"` / `"LOT"`) when IBKR gives it.
+      • Heuristic: a row whose `position` equals the sum of all OTHER rows'
+        positions (within tolerance) is the implicit summary — this is how
+        IBKR's "lot detail" mode lays out a multi-fill equity position when
+        `levelOfDetail` isn't included in the query output.
+      • Otherwise, all rows are treated as lots and aggregated.
+
+    History: an earlier fix unconditionally aggregated every group, which
+    silently **double-counted** when both a SUMMARY and the lots were
+    present (TSLA: 1 summary of 40 + 10 lots summing to 40 → "80 shares").
+    The IBKR Activity Statement is the source of truth; the SUMMARY row
+    matches it exactly.
+    """
+    if not rows:
+        return rows
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    order: list[tuple[str, str, str]] = []
+    for row in rows:
+        key = (
+            row.get("accountId") or "",
+            row.get("symbol") or "",
+            row.get("reportDate") or "",
+        )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+
+    out: list[dict[str, Any]] = []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+
+        # (1) IBKR-provided levelOfDetail.
+        summaries = [
+            r for r in group
+            if (r.get("levelOfDetail") or "").upper() == "SUMMARY"
+        ]
+        if summaries:
+            out.append(summaries[0])
+            continue
+
+        # (2) Heuristic: a row whose position is the sum of all other rows'
+        # positions is the implicit summary.
+        positions = [_as_float(r.get("position")) for r in group]
+        if all(p is not None for p in positions):
+            total = sum(positions)  # type: ignore[arg-type]
+            tol = max(1e-6, abs(total) * 1e-9)
+            for i, p in enumerate(positions):
+                if p is not None and abs(2 * p - total) < tol:
+                    out.append(group[i])
+                    break
+            else:
+                # No summary row found — fall through to aggregation.
+                out.append(_aggregate_flex_lots(group))
+            continue
+
+        # (3) Some position fields missing — best-effort aggregate.
+        out.append(_aggregate_flex_lots(group))
+    return out
+
+
+def _aggregate_flex_lots(lots: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum a list of LOT rows into one row matching the SUMMARY shape.
+
+    Used only when no SUMMARY row is present in the response. Field rules
+    are documented in `_collapse_flex_lots`. The original per-lot rows are
+    preserved under `_lots` for downstream audit (lands in `Holding.raw`).
+    """
+    head = dict(lots[0])
+
+    def _sum(field: str) -> float | None:
+        vals = [_as_float(lot.get(field)) for lot in lots]
+        present = [v for v in vals if v is not None]
+        return sum(present) if present else None
+
+    total_qty = _sum("position") or 0.0
+    total_cb_money = _sum("costBasisMoney")
+    total_value = _sum("positionValue")
+
+    if total_cb_money is not None and total_qty:
+        avg_cost: float | None = total_cb_money / total_qty
+    else:
+        num = 0.0
+        den = 0.0
+        for lot in lots:
+            q = _as_float(lot.get("position"))
+            p = _as_float(lot.get("costBasisPrice"))
+            if q is not None and p is not None:
+                num += q * p
+                den += q
+        avg_cost = num / den if den else None
+
+    head["position"] = total_qty
+    head["positionValue"] = total_value
+    head["costBasisMoney"] = total_cb_money
+    head["costBasisPrice"] = avg_cost
+    head["fifoPnlUnrealized"] = _sum("fifoPnlUnrealized")
+    head["percentOfNAV"] = _sum("percentOfNAV")
+    if total_qty > 0:
+        head["side"] = "Long"
+    elif total_qty < 0:
+        head["side"] = "Short"
+    head["_lots"] = lots
+    return head
 
 
 def _flex_to_holding(row: dict[str, Any]) -> dict[str, Any]:

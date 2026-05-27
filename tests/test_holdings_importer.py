@@ -178,6 +178,135 @@ def test_import_flex_skips_row_without_pk(session: Session) -> None:
     assert len(result.skipped) == 1
 
 
+# ----- importer: flex SUMMARY + LOT row de-dup --------------------------
+
+
+def test_import_flex_keeps_summary_drops_lots_when_both_present(
+    session: Session,
+) -> None:
+    """The actual TSLA bug case: IBKR Flex returns 1 SUMMARY (qty 40) plus
+    10 LOT rows summing to 40. The importer must keep the SUMMARY and drop
+    the lots — NOT sum everything (which would double-count to 80)."""
+    summary = {**_FLEX_ROW, "position": "40", "costBasisPrice": "438.7866",
+               "costBasisMoney": "17551.46"}
+    lot1 = {**_FLEX_ROW, "position": "10", "costBasisPrice": "479.00",
+            "costBasisMoney": "4790.0"}
+    lot2 = {**_FLEX_ROW, "position": "30", "costBasisPrice": "425.39",
+            "costBasisMoney": "12761.46"}
+    # Order shouldn't matter — IBKR can interleave or put summary anywhere.
+    result = import_holdings(session, source="flex", payload=[lot1, summary, lot2])
+    session.commit()
+
+    assert result.imported == 1
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    assert row is not None
+    assert row.quantity == 40.0, "must equal the SUMMARY row, not sum of all three"
+    assert row.avg_cost == pytest.approx(438.7866)
+    # Trusted SUMMARY → no _lots audit list (it'd be misleading).
+    assert "_lots" not in (row.raw or {})
+
+
+def test_import_flex_uses_level_of_detail_when_provided(session: Session) -> None:
+    """When IBKR includes the `levelOfDetail` attribute, the importer
+    prefers the row tagged SUMMARY regardless of the position-sum heuristic."""
+    summary = {**_FLEX_ROW, "position": "100", "costBasisPrice": "150.0",
+               "costBasisMoney": "15000.0", "levelOfDetail": "SUMMARY"}
+    lot = {**_FLEX_ROW, "position": "100", "costBasisPrice": "150.0",
+           "costBasisMoney": "15000.0", "levelOfDetail": "LOT"}
+    # Position-sum heuristic would tie (both 100); the levelOfDetail
+    # attribute is the tie-breaker.
+    import_holdings(session, source="flex", payload=[lot, summary])
+    session.commit()
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    assert row is not None and row.quantity == 100.0
+    assert "_lots" not in (row.raw or {})
+
+
+def test_import_flex_aggregates_when_only_lots_no_summary(
+    session: Session,
+) -> None:
+    """Fallback path: when neither a SUMMARY row nor a sum-equal pattern
+    is detectable (e.g. a query configured for LOT-only output), the
+    importer aggregates all rows. quantity is summed, avg_cost is the
+    Σ(costBasisMoney) / Σ(qty) weighted mean."""
+    # Three genuine lots, no row whose qty == sum-of-others, so heuristic
+    # finds no summary and falls through to aggregation.
+    lot1 = {**_FLEX_ROW, "position": "10", "costBasisPrice": "100.0",
+            "costBasisMoney": "1000.0", "positionValue": "1500.0",
+            "fifoPnlUnrealized": "500.0", "percentOfNAV": "5.0"}
+    lot2 = {**_FLEX_ROW, "position": "20", "costBasisPrice": "200.0",
+            "costBasisMoney": "4000.0", "positionValue": "3000.0",
+            "fifoPnlUnrealized": "-1000.0", "percentOfNAV": "10.0"}
+    lot3 = {**_FLEX_ROW, "position": "25", "costBasisPrice": "150.0",
+            "costBasisMoney": "3750.0", "positionValue": "3750.0",
+            "fifoPnlUnrealized": "0.0", "percentOfNAV": "12.5"}
+    # Sanity: positions 10/20/25/total 55; no row has qty == sum-of-others
+    # (10+20=30 ≠ 25, 10+25=35 ≠ 20, 20+25=45 ≠ 10). Heuristic falls through.
+    import_holdings(session, source="flex", payload=[lot1, lot2, lot3])
+    session.commit()
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    assert row is not None
+    assert row.quantity == 55.0  # aggregated
+    # weighted avg = (1000 + 4000 + 3750) / 55 = 8750 / 55 ≈ 159.09
+    assert row.avg_cost == pytest.approx(8750.0 / 55.0)
+    # In the fallback path the audit `_lots` list IS retained.
+    assert isinstance(row.raw.get("_lots"), list)
+    assert len(row.raw["_lots"]) == 3
+
+
+def test_import_flex_single_lot_passes_through_unchanged(session: Session) -> None:
+    """A position with exactly one row must not gain a `_lots` audit list."""
+    import_holdings(session, source="flex", payload=[_FLEX_ROW])
+    session.commit()
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    assert row is not None
+    assert "_lots" not in (row.raw or {})
+
+
+def test_import_flex_aggregate_falls_back_to_position_weighted_avg(
+    session: Session,
+) -> None:
+    """When `costBasisMoney` is empty on lots, recover avg_cost from the
+    per-lot prices and quantities directly."""
+    # Two lots, no summary (10 ≠ 30 and 30 ≠ 10), costBasisMoney missing.
+    lot1 = {**_FLEX_ROW, "position": "10", "costBasisPrice": "100.0",
+            "costBasisMoney": ""}
+    lot2 = {**_FLEX_ROW, "position": "30", "costBasisPrice": "200.0",
+            "costBasisMoney": ""}
+    # Heuristic check: total = 40. 2*10 = 20 ≠ 40, 2*30 = 60 ≠ 40 → no
+    # summary; falls through to aggregation.
+    import_holdings(session, source="flex", payload=[lot1, lot2])
+    session.commit()
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    # (10*100 + 30*200) / 40 = 7000 / 40 = 175
+    assert row is not None
+    assert row.avg_cost == pytest.approx(175.0)
+
+
+def test_import_flex_collapse_preserves_different_symbols(
+    session: Session,
+) -> None:
+    """Rows from different symbols stay separate after collapse."""
+    # AAPL has a summary (30 = 10 + 20); TSLA is single-lot.
+    aapl_sum = {**_FLEX_ROW, "symbol": "AAPL", "position": "30",
+                "costBasisMoney": "3000.0", "costBasisPrice": "100.0"}
+    aapl_lot1 = {**_FLEX_ROW, "symbol": "AAPL", "position": "10",
+                 "costBasisMoney": "900.0", "costBasisPrice": "90.0"}
+    aapl_lot2 = {**_FLEX_ROW, "symbol": "AAPL", "position": "20",
+                 "costBasisMoney": "2100.0", "costBasisPrice": "105.0"}
+    tsla_lot1 = {**_FLEX_ROW, "symbol": "TSLA", "position": "5",
+                 "costBasisMoney": "2000.0", "costBasisPrice": "400.0"}
+    import_holdings(
+        session, source="flex",
+        payload=[aapl_sum, aapl_lot1, aapl_lot2, tsla_lot1],
+    )
+    session.commit()
+    aapl = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    tsla = session.get(Holding, ("U16781493", "TSLA", date(2026, 5, 20)))
+    assert aapl is not None and aapl.quantity == 30.0
+    assert tsla is not None and tsla.quantity == 5.0
+
+
 # ----- importer: csv source ----------------------------------------------
 
 
