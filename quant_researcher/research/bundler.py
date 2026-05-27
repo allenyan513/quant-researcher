@@ -27,6 +27,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,7 @@ from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.valuation import ValuationSnapshot
 from quant_researcher.research import scores
 from quant_researcher.research.sector_classifier import classify_stock_type, net_revenue
+from quant_researcher.screen import indicators as ind
 
 
 def build_bundle(
@@ -64,6 +66,7 @@ def build_bundle(
         "cash_flow_recent": _recent_statements(session, CashFlow, symbol),
         "estimates_forward": _forward_estimates(session, symbol),
         "valuation_snapshots": _recent_valuations(session, symbol),
+        "technical": _technical_section(session, symbol),
         "scores": _scores_section(session, symbol),
         "quality": _quality_section(session, symbol),
         "ratio_history": _ratio_history(session, symbol),
@@ -414,6 +417,307 @@ def _short_interest_section(session: Session, symbol: str) -> dict[str, Any] | N
         "change_pct": row.change_pct,
         "avg_daily_volume": row.avg_daily_volume,
         "days_to_cover": row.days_to_cover,
+    }
+
+
+# ----- technical snapshot (1y price-action + trend / momentum / vol) -----
+
+
+_TECHNICAL_WINDOW = 252  # ~1 trading year
+_MIN_BARS = 50  # below this the indicators are too noisy to report
+_EVENT_LOOKBACK = 60  # MACD / 20-50 cross / RSI extremes window
+_SPIKE_LOOKBACK = 30
+_SPIKE_MULT = 2.0  # matches screen.technical.volume_spike default
+
+
+def _technical_section(
+    session: Session, symbol: str, *, lookback_days: int = _TECHNICAL_WINDOW
+) -> dict[str, Any] | None:
+    """Technical snapshot for SYM over ~1y: price action, SMA trend, RSI,
+    MACD, volume + a small signal_summary the report can use directly.
+
+    Returns:
+      • None when daily_prices has no rows for SYM.
+      • {"insufficient_data": True, "bars": N, ...} when N < 50.
+      • Full structured snapshot otherwise (see deep-research SKILL.md §10).
+
+    Uses adj_close (split/div-adjusted) where available so SMAs / RSI / MACD
+    don't get bent by corporate actions; falls back to close for any null
+    slot. The 50/200 golden/death cross is searched over the full window
+    (it's a rare event); other cross / extreme events use a 60-day lookback.
+    Indicator math reuses `quant_researcher.screen.indicators` (pure numpy).
+    """
+    rows = list(
+        session.scalars(
+            select(DailyPrice)
+            .where(DailyPrice.symbol == symbol)
+            .order_by(DailyPrice.trade_date.desc())
+            .limit(lookback_days)
+        )
+    )
+    if not rows:
+        return None
+    rows.reverse()  # oldest first for indicator math
+
+    bars = len(rows)
+    if bars < _MIN_BARS:
+        return {
+            "insufficient_data": True,
+            "bars": bars,
+            "reason": f"<{_MIN_BARS} bars in daily_prices; technical indicators unreliable",
+        }
+
+    adj_closes = np.array(
+        [(r.adj_close if r.adj_close is not None else r.close) for r in rows],
+        dtype=float,
+    )
+    # Forward-fill any remaining None slots (close also missing). Realistically
+    # zero in production; we just don't want a NaN to cascade through.
+    if np.isnan(adj_closes).any():
+        valid = ~np.isnan(adj_closes)
+        if not valid.any():
+            return None
+        first = int(np.argmax(valid))
+        adj_closes[:first] = adj_closes[first]
+        for i in range(first + 1, len(adj_closes)):
+            if np.isnan(adj_closes[i]):
+                adj_closes[i] = adj_closes[i - 1]
+
+    volumes = np.array([(r.volume or 0) for r in rows], dtype=float)
+    dates = [r.trade_date for r in rows]
+    adj_close_used = any(r.adj_close is not None for r in rows)
+
+    sma20 = ind.sma(adj_closes, 20)
+    sma50 = ind.sma(adj_closes, 50)
+    sma200 = ind.sma(adj_closes, 200)  # all-NaN when bars < 200; that's fine
+    rsi14 = ind.rsi(adj_closes, 14)
+    macd_line, macd_sig, macd_hist = ind.macd(adj_closes, 12, 26, 9)
+    vol_sma20 = ind.sma(volumes, 20)
+
+    latest_close = float(adj_closes[-1])
+
+    def _last(arr: np.ndarray) -> float | None:
+        v = arr[-1]
+        return None if np.isnan(v) else float(v)
+
+    def _vs(price: float, level: float | None) -> float | None:
+        if level is None or level == 0:
+            return None
+        return (price / level - 1) * 100
+
+    # ---- price_action ----
+    def _ret_pct(periods: int) -> float | None:
+        if bars <= periods:
+            return None
+        base = adj_closes[-1 - periods]
+        if base <= 0:
+            return None
+        return (adj_closes[-1] / base - 1) * 100
+
+    high_52w = float(np.max(adj_closes))
+    low_52w = float(np.min(adj_closes))
+    high_idx = int(np.argmax(adj_closes))
+    low_idx = int(np.argmin(adj_closes))
+
+    running_max = np.maximum.accumulate(adj_closes)
+    drawdowns = (adj_closes - running_max) / running_max
+    trough_idx = int(np.argmin(drawdowns))
+    max_dd_pct = float(drawdowns[trough_idx] * 100)
+    if max_dd_pct < -1e-9:
+        peak_idx = int(np.argmax(adj_closes[: trough_idx + 1]))
+        peak_date: str | None = dates[peak_idx].isoformat()
+        trough_date: str | None = dates[trough_idx].isoformat()
+    else:
+        max_dd_pct = 0.0
+        peak_date = None
+        trough_date = None
+
+    price_action = {
+        "latest_close": latest_close,
+        "return_6m_pct": _ret_pct(126),
+        "return_1y_pct": _ret_pct(min(252, bars - 1)),
+        "high_52w": high_52w,
+        "high_52w_date": dates[high_idx].isoformat(),
+        "low_52w": low_52w,
+        "low_52w_date": dates[low_idx].isoformat(),
+        "pct_below_52w_high": (latest_close / high_52w - 1) * 100 if high_52w else None,
+        "pct_above_52w_low": (latest_close / low_52w - 1) * 100 if low_52w else None,
+        "max_drawdown_pct": max_dd_pct,
+        "max_drawdown_peak_date": peak_date,
+        "max_drawdown_trough_date": trough_date,
+    }
+
+    # ---- trend ----
+    sma20_last = _last(sma20)
+    sma50_last = _last(sma50)
+    sma200_last = _last(sma200)
+
+    def _last_cross_date(
+        fast: np.ndarray, slow: np.ndarray, direction: str, lookback: int
+    ) -> str | None:
+        """direction = 'up' (fast crosses above slow) | 'down' (fast crosses below)."""
+        n = len(fast)
+        start = max(1, n - lookback)
+        last: int | None = None
+        for i in range(start, n):
+            if (
+                np.isnan(fast[i])
+                or np.isnan(slow[i])
+                or np.isnan(fast[i - 1])
+                or np.isnan(slow[i - 1])
+            ):
+                continue
+            if direction == "up" and fast[i - 1] <= slow[i - 1] and fast[i] > slow[i]:
+                last = i
+            elif direction == "down" and fast[i - 1] >= slow[i - 1] and fast[i] < slow[i]:
+                last = i
+        return dates[last].isoformat() if last is not None else None
+
+    last_20_50_up = _last_cross_date(sma20, sma50, "up", _EVENT_LOOKBACK)
+    last_20_50_down = _last_cross_date(sma20, sma50, "down", _EVENT_LOOKBACK)
+    if last_20_50_up and (not last_20_50_down or last_20_50_up >= last_20_50_down):
+        last_cross_20_50: dict[str, Any] | None = {
+            "date": last_20_50_up,
+            "direction": "up",
+        }
+    elif last_20_50_down:
+        last_cross_20_50 = {"date": last_20_50_down, "direction": "down"}
+    else:
+        last_cross_20_50 = None
+
+    trend = {
+        "sma20": sma20_last,
+        "price_vs_sma20_pct": _vs(latest_close, sma20_last),
+        "sma50": sma50_last,
+        "price_vs_sma50_pct": _vs(latest_close, sma50_last),
+        "sma200": sma200_last,
+        "price_vs_sma200_pct": _vs(latest_close, sma200_last),
+        # 50/200 cross uses the full window — a rare, slow event, worth surfacing
+        # even when it happened ~6 months ago.
+        "last_golden_cross_50_200": _last_cross_date(sma50, sma200, "up", bars),
+        "last_death_cross_50_200": _last_cross_date(sma50, sma200, "down", bars),
+        "last_cross_20_50": last_cross_20_50,
+    }
+
+    # ---- momentum (RSI 14) ----
+    rsi_last = _last(rsi14)
+    if rsi_last is None:
+        rsi_zone = "unknown"
+    elif rsi_last < 30:
+        rsi_zone = "oversold"
+    elif rsi_last > 70:
+        rsi_zone = "overbought"
+    else:
+        rsi_zone = "neutral"
+
+    def _zone_days(arr: np.ndarray, threshold: float, kind: str) -> list[str]:
+        n = len(arr)
+        start = max(0, n - _EVENT_LOOKBACK)
+        out: list[str] = []
+        for i in range(start, n):
+            v = arr[i]
+            if np.isnan(v):
+                continue
+            if kind == "oversold" and v < threshold:
+                out.append(dates[i].isoformat())
+            elif kind == "overbought" and v > threshold:
+                out.append(dates[i].isoformat())
+        return out
+
+    momentum = {
+        "rsi14_latest": rsi_last,
+        "rsi14_zone": rsi_zone,
+        "oversold_days_last_60": _zone_days(rsi14, 30, "oversold"),
+        "overbought_days_last_60": _zone_days(rsi14, 70, "overbought"),
+    }
+
+    # ---- MACD ----
+    macd_block = {
+        "line": _last(macd_line),
+        "signal": _last(macd_sig),
+        "histogram": _last(macd_hist),
+        "last_golden_cross_60d": _last_cross_date(macd_line, macd_sig, "up", _EVENT_LOOKBACK),
+        "last_death_cross_60d": _last_cross_date(macd_line, macd_sig, "down", _EVENT_LOOKBACK),
+    }
+
+    # ---- volume ----
+    avg_vol_20 = _last(vol_sma20)
+    latest_vol = float(volumes[-1])
+    latest_vs_avg = latest_vol / avg_vol_20 if avg_vol_20 else None
+
+    spike_days: list[dict[str, Any]] = []
+    spike_start = max(20, len(volumes) - _SPIKE_LOOKBACK)
+    for i in range(spike_start, len(volumes)):
+        m = vol_sma20[i]
+        if np.isnan(m) or m == 0:
+            continue
+        if volumes[i] > m * _SPIKE_MULT:
+            spike_days.append(
+                {
+                    "date": dates[i].isoformat(),
+                    "volume": int(volumes[i]),
+                    "x": float(volumes[i] / m),
+                }
+            )
+
+    volume_block = {
+        "avg_volume_20d": avg_vol_20,
+        "latest_volume": int(latest_vol),
+        "latest_vs_avg_x": latest_vs_avg,
+        "spike_days_last_30": spike_days,
+    }
+
+    # ---- signal_summary (one-line bias on each axis) ----
+    if sma20_last is not None and sma50_last is not None and sma200_last is not None:
+        if sma20_last > sma50_last > sma200_last:
+            trend_bias = "up"
+        elif sma20_last < sma50_last < sma200_last:
+            trend_bias = "down"
+        else:
+            trend_bias = "mixed"
+    else:
+        trend_bias = "mixed"
+
+    macd_line_v = macd_block["line"]
+    macd_sig_v = macd_block["signal"]
+    macd_hist_v = macd_block["histogram"] or 0
+    if macd_line_v is not None and macd_sig_v is not None:
+        if macd_line_v > macd_sig_v and macd_hist_v > 0:
+            macd_bias = "bullish"
+        elif macd_line_v < macd_sig_v and macd_hist_v < 0:
+            macd_bias = "bearish"
+        else:
+            macd_bias = "neutral"
+    else:
+        macd_bias = "neutral"
+
+    pct_below_high = price_action["pct_below_52w_high"]
+    pct_above_low = price_action["pct_above_52w_low"]
+    if pct_below_high is not None and pct_below_high > -5:
+        near_extreme = "near_high"
+    elif pct_above_low is not None and pct_above_low < 5:
+        near_extreme = "near_low"
+    else:
+        near_extreme = "none"
+
+    signal_summary = {
+        "trend_bias": trend_bias,
+        "momentum_bias": rsi_zone,
+        "macd_bias": macd_bias,
+        "near_52w_extreme": near_extreme,
+    }
+
+    return {
+        "bars_in_window": bars,
+        "oldest_trade_date": dates[0].isoformat(),
+        "latest_trade_date": dates[-1].isoformat(),
+        "adj_close_used": adj_close_used,
+        "price_action": price_action,
+        "trend": trend,
+        "momentum": momentum,
+        "macd": macd_block,
+        "volume": volume_block,
+        "signal_summary": signal_summary,
     }
 
 
