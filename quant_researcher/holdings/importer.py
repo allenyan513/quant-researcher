@@ -158,14 +158,33 @@ def _collapse_flex_lots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out.append(summaries[0])
             continue
 
-        # (2) Heuristic: a row whose position is the sum of all other rows'
-        # positions is the implicit summary.
+        # (2) Heuristic: a row whose position is the sum of all OTHER rows'
+        # positions is the implicit summary. Position alone is dangerous —
+        # multi-lot groups can have a lot whose qty happens to equal the
+        # sum-of-others ([10, 20, 30] → 2·30 == 60) and we'd silently drop
+        # the rest. Require the same relationship to hold on the dollar
+        # aggregate fields (`positionValue`, `costBasisMoney`): a real
+        # summary matches on all aggregates simultaneously, a coincidence
+        # on one usually doesn't on another.
         positions = [_as_float(r.get("position")) for r in group]
         if all(p is not None for p in positions):
             total = sum(positions)  # type: ignore[arg-type]
             tol = max(1e-6, abs(total) * 1e-9)
             for i, p in enumerate(positions):
-                if p is not None and abs(2 * p - total) < tol:
+                if p is None or abs(2 * p - total) >= tol:
+                    continue
+                # Confirm with whichever dollar aggregates the response has.
+                confirmed = True
+                for field in ("positionValue", "costBasisMoney"):
+                    vals = [_as_float(r.get(field)) for r in group]
+                    if not all(v is not None for v in vals):
+                        continue  # field missing on at least one row — skip
+                    total_v = sum(vals)  # type: ignore[arg-type]
+                    tol_v = max(1e-6, abs(total_v) * 1e-9)
+                    if abs(2 * vals[i] - total_v) >= tol_v:  # type: ignore[operator]
+                        confirmed = False
+                        break
+                if confirmed:
                     out.append(group[i])
                     break
             else:
