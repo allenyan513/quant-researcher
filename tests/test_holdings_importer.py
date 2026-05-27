@@ -187,12 +187,15 @@ def test_import_flex_keeps_summary_drops_lots_when_both_present(
     """The actual TSLA bug case: IBKR Flex returns 1 SUMMARY (qty 40) plus
     10 LOT rows summing to 40. The importer must keep the SUMMARY and drop
     the lots — NOT sum everything (which would double-count to 80)."""
+    # positionValue / costBasisMoney on the summary equal the sum of the
+    # lots — this is the real-world Flex shape and what the multi-field
+    # cross-check expects.
     summary = {**_FLEX_ROW, "position": "40", "costBasisPrice": "438.7866",
-               "costBasisMoney": "17551.46"}
+               "costBasisMoney": "17551.46", "positionValue": "17343.60"}
     lot1 = {**_FLEX_ROW, "position": "10", "costBasisPrice": "479.00",
-            "costBasisMoney": "4790.0"}
+            "costBasisMoney": "4790.0",   "positionValue": "4335.90"}
     lot2 = {**_FLEX_ROW, "position": "30", "costBasisPrice": "425.39",
-            "costBasisMoney": "12761.46"}
+            "costBasisMoney": "12761.46", "positionValue": "13007.70"}
     # Order shouldn't matter — IBKR can interleave or put summary anywhere.
     result = import_holdings(session, source="flex", payload=[lot1, summary, lot2])
     session.commit()
@@ -220,6 +223,31 @@ def test_import_flex_uses_level_of_detail_when_provided(session: Session) -> Non
     row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
     assert row is not None and row.quantity == 100.0
     assert "_lots" not in (row.raw or {})
+
+
+def test_import_flex_no_false_summary_when_one_lot_qty_sums_others(
+    session: Session,
+) -> None:
+    """Regression for a heuristic false-positive: a multi-lot group like
+    [10, 20, 30] satisfies `2 * 30 == total(60)` on position alone, but
+    the dollar aggregates (`positionValue`, `costBasisMoney`) do NOT —
+    so the row is NOT misidentified as a summary, and all three lots
+    survive into the aggregate. Lots of equal size at *different* prices
+    would hit the same heuristic trap; same defense applies."""
+    lot1 = {**_FLEX_ROW, "position": "10", "costBasisPrice": "100.0",
+            "costBasisMoney": "1000.0", "positionValue": "1100.0"}
+    lot2 = {**_FLEX_ROW, "position": "20", "costBasisPrice": "110.0",
+            "costBasisMoney": "2200.0", "positionValue": "2200.0"}
+    lot3 = {**_FLEX_ROW, "position": "30", "costBasisPrice": "120.0",
+            "costBasisMoney": "3600.0", "positionValue": "3300.0"}
+    import_holdings(session, source="flex", payload=[lot1, lot2, lot3])
+    session.commit()
+    row = session.get(Holding, ("U16781493", "AAPL", date(2026, 5, 20)))
+    assert row is not None
+    # All three aggregated, not just the 30-share lot.
+    assert row.quantity == 60.0
+    assert row.cost_basis_total == pytest.approx(6800.0)
+    assert row.market_value == pytest.approx(6600.0)
 
 
 def test_import_flex_aggregates_when_only_lots_no_summary(
@@ -287,13 +315,17 @@ def test_import_flex_collapse_preserves_different_symbols(
     session: Session,
 ) -> None:
     """Rows from different symbols stay separate after collapse."""
-    # AAPL has a summary (30 = 10 + 20); TSLA is single-lot.
+    # AAPL has a summary (30 = 10 + 20) — positionValue and costBasisMoney
+    # on the summary match the sum of the lots (real Flex shape).
     aapl_sum = {**_FLEX_ROW, "symbol": "AAPL", "position": "30",
-                "costBasisMoney": "3000.0", "costBasisPrice": "100.0"}
+                "costBasisMoney": "3000.0", "costBasisPrice": "100.0",
+                "positionValue": "3300.0"}
     aapl_lot1 = {**_FLEX_ROW, "symbol": "AAPL", "position": "10",
-                 "costBasisMoney": "900.0", "costBasisPrice": "90.0"}
+                 "costBasisMoney": "900.0", "costBasisPrice": "90.0",
+                 "positionValue": "1100.0"}
     aapl_lot2 = {**_FLEX_ROW, "symbol": "AAPL", "position": "20",
-                 "costBasisMoney": "2100.0", "costBasisPrice": "105.0"}
+                 "costBasisMoney": "2100.0", "costBasisPrice": "105.0",
+                 "positionValue": "2200.0"}
     tsla_lot1 = {**_FLEX_ROW, "symbol": "TSLA", "position": "5",
                  "costBasisMoney": "2000.0", "costBasisPrice": "400.0"}
     import_holdings(
