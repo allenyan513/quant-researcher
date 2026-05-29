@@ -55,7 +55,7 @@
                           │                     │  - notify            │ │
                           │                     └──────────┬───────────┘ │
                           │  ┌──────────────────────────────▼──────────┐ │
-                          │  │  Persistence (Supabase / Postgres)       │ │
+                          │  │  Persistence (Neon serverless PG)        │ │
                           │  │  events · signals · decisions · snapshots│ │
                           │  └────────┬─────────────────────┬──────────┘ │
                           │  ┌────────▼────────┐  ┌──────────▼─────────┐ │
@@ -186,7 +186,7 @@
   target_price, stop_loss, horizon_days, suggested_size,
   fair_value_base（来自 System A，可空）, deviation_pct, thesis,
   generated_by(llm/algo), snapshot_id, created_at, expires_at, status`。
-- **DB 定 Supabase（托管 Postgres）**，开发+生产统一，省一次 SQLite→PG 的迁移，且自带查询面板看信号。Schema 走现有 `db.py` 的 Base + Alembic/SQL 迁移。
+- **DB 定 Neon（serverless Postgres）**，开发+生产统一，省一次 SQLite→PG 的迁移。Neon scale-to-zero、按用量计费，且是标准 PG wire protocol，现有 SQLAlchemy/psycopg 直接连。Schema 走现有 `db.py` 的 Base + Alembic/SQL 迁移。注意 serverless DB 可能 cold-start（首查有几百 ms 延迟）+ 连接走 pooler（`?sslmode=require`、用 pooled endpoint）。
 - 注意现有测试用内存 SQLite——`DateTime(timezone=True)` 列在测试里仍要 `_naive_utc` 归一。
 
 ### 3.5 Signal Monitor（监控回路，全新）
@@ -224,20 +224,20 @@
 | Web 框架 | FastAPI + uvicorn | async、webhook 友好、自带 OpenAPI |
 | Agent | Claude Agent SDK (Python) | 你点名要的决策大脑 |
 | 实时数据 | FMP `analyst`/`news`（起步）→ 付费 webhook 源（升级） | 评级调整正是 FMP analyst 端点；起步成本低 |
-| 数据库 | **Supabase（托管 Postgres）**，开发+生产统一 | 已拍板；复用现有 SQLAlchemy，自带面板 |
+| 数据库 | **Neon（serverless Postgres）**，开发+生产统一 | 已拍板；scale-to-zero 按用量计费，标准 PG，复用现有 SQLAlchemy |
 | 通知 | SMTP 起步 → Telegram/Twilio | 渐进 |
 | 部署 | **标准 Docker 容器**，平台无关（见 §4.5） | 先跑 AWS，能随时搬走 |
 
-> 注：本对话环境里已经挂了 FMP、Supabase、Gmail、Vercel 等 MCP server——
-> 它们正好可以在**开发/验证阶段**当现成工具用（FMP 取评级/新闻、Supabase 建表、
-> Gmail 发通知），生产再换成进程内实现。
+> 注：本对话环境里已经挂了 FMP、Gmail 等 MCP server——
+> 它们正好可以在**开发/验证阶段**当现成工具用（FMP 取评级/新闻、
+> Gmail 发通知），生产再换成进程内实现。Neon 走标准 PG 连接，不依赖 MCP。
 
 ## 4.5 部署哲学：平台无关（platform-agnostic）
 
 **硬性约束：代码绝不绑定任何云的专有 API。** 整个服务打成一个标准 Docker 容器，
 对外部资源的依赖全部走可替换的抽象：
 
-- **存储** → 只认 Postgres connection string（Supabase / RDS / 自建 PG 都行）。
+- **存储** → 只认 Postgres connection string（Neon / RDS / 自建 PG 都行）。
 - **密钥** → 只认环境变量（本地 `.env` / AWS Secrets Manager / 任何 secret 注入都行）。
 - **通知** → `Notifier` 接口（SMTP / Twilio / Telegram 可换）。
 - **数据源** → `EventSource` 接口（FMP / 付费 webhook 可换）。
@@ -257,7 +257,7 @@
 
 ## 5. 分阶段路线图（建议一里程碑一 PR）
 
-- **Phase 0 — 服务骨架**：建 `service/` + `signal_system/` 包、FastAPI app、`/healthz`、把 `value_company` 等包成 tool、连 Supabase、本地 `docker compose` 跑起来。
+- **Phase 0 — 服务骨架**：建 `service/` + `signal_system/` 包、FastAPI app、`/healthz`、把 `value_company` 等包成 tool、连 Neon、本地 `docker compose` 跑起来。
 - **Phase 1 — 闭环 MVP（同步、单源、手动喂事件）**：`POST /events/replay` 喂一条"评级下调"假事件 → Agent 分类→取数→重定价→`LlmSignalGenerator` 产出含 target/stop/horizon 的信号→落库→**发邮件**。**先把整条链跑通**，不接真实时源。
 - **Phase 2 — 监控回路**：上 `Signal Monitor`，每日扫 open 信号，到目标价/跌破止损/到期 → 通知 + 状态流转。信号生命周期闭环。
 - **Phase 3 — 真实时接入**：接 FMP poller（免费起步）/ 真 webhook 源、事件队列、去重、重试、错误隔离。
@@ -269,7 +269,7 @@
 ## 6. 已拍板 / 待拍板
 
 **已拍板：**
-- ✅ 数据库 = **Supabase（Postgres）**，开发+生产统一。
+- ✅ 数据库 = **Neon（serverless Postgres）**，开发+生产统一。
 - ✅ 部署 = **平台无关 Docker 容器**，AWS 作为第一落脚点（起步用单个 always-on 容器）。
 - ✅ 两套体系解耦：估值体系(A) 与 交易信号体系(B) 独立；信号含 target/stop/horizon/direction。
 - ✅ 信号生成器可插拔：现在 `LlmSignalGenerator`，将来 `AlgoSignalGenerator`。
