@@ -55,15 +55,27 @@
                           │                     │  - notify            │ │
                           │                     └──────────┬───────────┘ │
                           │  ┌──────────────────────────────▼──────────┐ │
-                          │  │  Persistence (Postgres / Supabase)       │ │
+                          │  │  Persistence (Supabase / Postgres)       │ │
                           │  │  events · signals · decisions · snapshots│ │
-                          │  └──────────────────────────────┬──────────┘ │
-                          │  ┌────────────┐  ┌───────────────▼─────────┐ │
-   操作者手机/邮箱 ◀────────│  │ Notifier   │  │  REST API (查询/控制)    │ │
-   (邮件/短信/IM)          │  │ email/SMS  │  │  GET /signals 等         │ │
-                          │  └────────────┘  └─────────────────────────┘ │
+                          │  └────────┬─────────────────────┬──────────┘ │
+                          │  ┌────────▼────────┐  ┌──────────▼─────────┐ │
+                          │  │ Signal Monitor  │  │  REST API (查询/控制)│ │
+                          │  │ 每日扫盘/目标管理 │  │  GET /signals 等     │ │
+                          │  │ 到目标价/跌破止损/ │  └────────────────────┘ │
+                          │  │ 持有期到期 → 触发 │                          │
+                          │  └────────┬────────┘                          │
+                          │  ┌────────▼────────┐                          │
+   操作者手机/邮箱 ◀────────│  │ Notifier        │                          │
+   (邮件/短信/IM)          │  │ email/SMS/IM    │                          │
+                          │  └─────────────────┘                          │
                           └─────────────────────────────────────────────┘
 ```
+
+> 注意系统里有**两条相对独立的回路**：
+> **(A) 事件回路**（上半，实时事件 → 生成信号）和
+> **(B) 监控回路**（下半，`Signal Monitor` 每日/盘中扫描已落盘的 open 信号，
+> 到目标价 / 跌破止损 / 持有期到期就触发通知与状态流转）。
+> 信号**不是发完就完**——它是一个有生命周期、被管理的"头寸"。
 
 ### 端到端事件流（一条消息从进来到落地）
 
@@ -72,10 +84,66 @@
 3. **分类**：Agent 调 `classify_event` —— 这是评级调整？并购？财报超预期？还是宏观噪声（直接丢弃）？提取出 `symbol`、`event_type`、`direction`、关键数字（新目标价/收购价等）。
 4. **取数**：Agent 调 `refresh_data --symbols X`（只刷该票的 quote/ratios/estimates），保证估值输入新鲜。
 5. **重定价**：Agent 调 `value_company`。**关键：单纯重跑不会变**，因为 DCF 输入是季报数据。所以 Agent 要**读懂新闻、调整假设**（如：被收购→以收购价为锚；评级下调→下调增长率假设），再跑 `value`/`research_bundle` 拿到新的公允价值区间。
-6. **生成信号**：Agent 调 `compute_signal`——结合"公允价值 vs 现价偏离%"+ 事件方向 + 置信度，产出 `{side, conviction, target_price, suggested_size}`。
-7. **落库**：调 `record_decision`（已自动 snapshot 当时数据，可回放）+ 写 `signals` 表。
+6. **生成信号**：Agent 调 `compute_signal`——这是**交易体系**(System B，见 §1.5)在干活。它把估值体系(System A)的公允价值当作**输入之一**，再结合现价偏离、事件方向、置信度，产出一条完整的量化信号：`{direction, conviction, entry_price, target_price, stop_loss, horizon, suggested_size}`。
+7. **落库**：调 `record_decision`（已自动 snapshot 当时数据，可回放）+ 写 `signals` 表（含 target/stop/horizon/status=open）。
 8. **通知**：调 `notify` 把信号摘要发到邮箱/手机。
 9. 操作者在自己的模拟盘**手动**下单（人始终在环里）。
+10. **此后进入监控回路**：`Signal Monitor` 每天扫这条 open 信号，直到 target_hit / stopped_out / expired，再次通知你处置。
+
+---
+
+## 1.5 两套体系：估值体系 vs 交易体系（核心解耦）
+
+这是 v2 最重要的一个概念区分。系统里有**两套互相独立的体系**，职责完全不同：
+
+| | **System A — 估值体系**（已有） | **System B — 交易体系**（新建） |
+|---|---|---|
+| 别名 | 基于财报的估值体系 | 价格体系 / 交易信号体系 |
+| 回答的问题 | "这家公司**值多少钱**？" | "**现在该买还是卖**？目标、止损、持有多久？" |
+| 输入 | 财报：现金流、增长、利润率… | 现价、估值偏离、事件、（未来）技术面/量价 |
+| 节奏 | 慢（季度财报驱动） | 快（事件/价格驱动） |
+| 现有实现 | `valuation/`：DCF / PEG / multiples | **无，需新建** `quant_researcher/signal_system/` |
+| 输出 | 公允价值区间 | 一条结构化**交易信号**（见下） |
+
+**两者的关系：单向、松耦合。** System A 的公允价值只是 System B 的**输入之一**，
+而不是唯一来源——这样将来 System B 可以**完全不依赖 DCF**，纯靠价格/事件/算法跑。
+绝不能把交易逻辑塞进 `valuation/`，那会把两套节奏完全不同的东西焊死。
+
+### 交易信号的结构（模仿量化框架）
+
+参考成熟量化平台的 signal 机制，一条信号必须包含这些要素：
+
+| 字段 | 含义 |
+|---|---|
+| `direction` | 买 / 卖 / 持有 |
+| `conviction` | 信号强度 / 置信度 |
+| `entry_price` | 入场参考价（= 信号生成时现价） |
+| `target_price` | **目标价**（如"现价 1600 → 目标 2000"） |
+| `stop_loss` | **止损价** |
+| `horizon` | **持有时间**（如 1 个月、3 个月） |
+| `suggested_size` | 建议仓位（额度规则见 §6 待定项） |
+| `generated_by` | `llm` 或 `algo`（见下，可插拔） |
+| `status` | `open / target_hit / stopped_out / expired / closed` |
+
+### 信号生成器可插拔（现在 LLM，将来算法）
+
+`SignalGenerator` 做成一个接口，两种实现可热插拔：
+- **`LlmSignalGenerator`**（Phase 1）：Claude Agent SDK 读事件 + 估值 + 上下文，用语言推理生成信号。**起步快**。
+- **`AlgoSignalGenerator`**（将来）：在积累大量历史数据后，用算法/模型（规则阈值或 ML）生成信号。**可回测、可量化**。
+
+两种生成器写进同一张 `signals` 表、走同一条监控回路，靠 `generated_by` 区分，
+方便用 `qr backtest` / `ledger scorecard` 对比"LLM 信号 vs 算法信号"谁的 alpha 更好。
+
+### 信号生命周期管理（Signal Monitor）
+
+落盘 ≠ 结束。新增 `Signal Monitor` 组件，定时（每日收盘后 + 可选盘中）扫描所有 `open` 信号：
+
+- 现价 **≥ target_price** → 标 `target_hit`，通知"目标达成，考虑止盈"。
+- 现价 **≤ stop_loss** → 标 `stopped_out`，**第一时间**通知"跌破止损"。
+- now **≥ created_at + horizon** → 标 `expired`，通知"持有期到，复盘是否到达目标"。
+
+这条回路天然接上现有的 `ledger track`（前向收益）/ `scorecard`（按 conviction/来源打分），
+形成"生成信号 → 管理 → 复盘打分 → 反哺生成器阈值"的闭环。
 
 ---
 
@@ -106,32 +174,44 @@
 | `value_company` | `valuation/engine.py::value_company()` |
 | `record_decision` | `ledger/engine.py::record_decision()` |
 | `classify_event` | **新增**（轻量分类/抽取） |
-| `compute_signal` | **新增**（偏离% + 方向 → side/size） |
+| `compute_signal` | **新增** = 交易体系 System B（§1.5），产出含 target/stop/horizon 的完整信号 |
 | `notify` | **新增**（通知层） |
 
-### 3.4 信号 schema + 持久化
-- 新表 `raw_events`（原始消息+去重键）、`signals`（结构化信号）。
-- `signals` 字段建议：`id, event_id, symbol, side, conviction, fair_value_low/base/high,
-  price_at_signal, deviation_pct, suggested_size, thesis, snapshot_id, created_at, status`。
-- DB：本地开发可继续 SQLite/本地 Postgres；生产用 Postgres（**Supabase** 是一个现成的托管选项，也方便后面做查询面板）。Schema 迁移走现有 `db.py` 的 Base。
+`compute_signal` 背后是 `quant_researcher/signal_system/`（System B），与 `valuation/`（System A）**完全隔离**。
 
-### 3.5 通知层（全新，最容易）
+### 3.4 信号 schema + 持久化
+- 新表 `raw_events`（原始消息+去重键）、`signals`（结构化交易信号）。
+- `signals` 字段（对齐 §1.5 的量化信号要素）：
+  `id, event_id, symbol, direction(buy/sell/hold), conviction, entry_price,
+  target_price, stop_loss, horizon_days, suggested_size,
+  fair_value_base（来自 System A，可空）, deviation_pct, thesis,
+  generated_by(llm/algo), snapshot_id, created_at, expires_at, status`。
+- **DB 定 Supabase（托管 Postgres）**，开发+生产统一，省一次 SQLite→PG 的迁移，且自带查询面板看信号。Schema 走现有 `db.py` 的 Base + Alembic/SQL 迁移。
+- 注意现有测试用内存 SQLite——`DateTime(timezone=True)` 列在测试里仍要 `_naive_utc` 归一。
+
+### 3.5 Signal Monitor（监控回路，全新）
+- 一个定时任务（每日收盘后必跑，盘中可选），扫 `status=open` 的信号：
+  取最新 quote → 命中 `target_price` / `stop_loss` / `expires_at` 任一条件 → 流转 status + 触发 `notify`。
+- 跌破止损是**最高优先级**，应尽量盘中扫到、第一时间推送。
+- 复用现有 `ledger track` 给每条信号算前向收益，喂回 `scorecard` 打分。
+
+### 3.6 通知层（全新，最容易）
 - 抽象 `Notifier` 接口，先实现 **邮件 (SMTP)**（几十行），后续可加短信（Twilio）或 IM（Telegram/Server酱，国内手机更现实）。
 - 配置走现有 `config.py`（pydantic-settings，从 env 读）。
 
-### 3.6 REST API（对外接口）
+### 3.7 REST API（对外接口）
 - `POST /webhook/{source}` — 实时入口
-- `GET /signals?symbol=&since=` — 查信号
+- `GET /signals?symbol=&status=&since=` — 查信号（含生命周期状态）
 - `GET /events/{id}` — 查单条事件全链路（含 snapshot，可回放）
 - `POST /events/replay` — 手动喂一条事件（开发/测试用，也是 Phase 1 的验证手段）
-- `GET /healthz` — 健康检查（AWS 负载均衡需要）
+- `GET /healthz` — 健康检查（任何容器编排/负载均衡都需要）
 
 ---
 
 ## 3. 与现有架构契约的兼容
 
 - **JSON envelope 契约不变**：CLI 仍是 CLI。服务层**直接调用底层函数**，不去 subprocess 跑 `qr`（避免一命令一 envelope 的限制反而碍事）。
-- **新代码隔离在 `quant_researcher/service/`**，不动现有 domain。
+- **新代码隔离在两个新包**：`quant_researcher/service/`（FastAPI/agent/monitor/notify）和 `quant_researcher/signal_system/`（System B，§1.5）。不动现有 domain。
 - 复用现有 gotchas 经验：lazy-import、`_emit` 不放 try、SQLite 无 tz 用 `_naive_utc`。
 - 新增依赖：`fastapi`、`uvicorn`、`claude-agent-sdk`（或 `anthropic`）、`anyio`。放进 `pyproject.toml` 主依赖；通知/部署相关放 optional extras。
 
@@ -144,33 +224,61 @@
 | Web 框架 | FastAPI + uvicorn | async、webhook 友好、自带 OpenAPI |
 | Agent | Claude Agent SDK (Python) | 你点名要的决策大脑 |
 | 实时数据 | FMP `analyst`/`news`（起步）→ 付费 webhook 源（升级） | 评级调整正是 FMP analyst 端点；起步成本低 |
-| 数据库 | 本地 Postgres → 生产 Supabase/RDS | 复用现有 SQLAlchemy |
+| 数据库 | **Supabase（托管 Postgres）**，开发+生产统一 | 已拍板；复用现有 SQLAlchemy，自带面板 |
 | 通知 | SMTP 起步 → Telegram/Twilio | 渐进 |
-| 部署 | 本地 Docker → **AWS ECS Fargate**（常驻 + ALB + 健康检查） | 常驻服务最稳的形态；webhook 入口也可单独走 Lambda+API GW |
+| 部署 | **标准 Docker 容器**，平台无关（见 §4.5） | 先跑 AWS，能随时搬走 |
 
 > 注：本对话环境里已经挂了 FMP、Supabase、Gmail、Vercel 等 MCP server——
 > 它们正好可以在**开发/验证阶段**当现成工具用（FMP 取评级/新闻、Supabase 建表、
 > Gmail 发通知），生产再换成进程内实现。
 
+## 4.5 部署哲学：平台无关（platform-agnostic）
+
+**硬性约束：代码绝不绑定任何云的专有 API。** 整个服务打成一个标准 Docker 容器，
+对外部资源的依赖全部走可替换的抽象：
+
+- **存储** → 只认 Postgres connection string（Supabase / RDS / 自建 PG 都行）。
+- **密钥** → 只认环境变量（本地 `.env` / AWS Secrets Manager / 任何 secret 注入都行）。
+- **通知** → `Notifier` 接口（SMTP / Twilio / Telegram 可换）。
+- **数据源** → `EventSource` 接口（FMP / 付费 webhook 可换）。
+
+这样在哪跑都行：本地 `docker compose`、AWS、GCP Cloud Run、Fly.io、一台 VPS。
+
+**关于 AWS / serverless 的张力（你提到的点）：**
+- 优势：你熟、首次部署启动成本低。
+- 矛盾：纯 **serverless（Lambda / Cloud Run scale-to-zero）跑不了"常驻后台"** ——
+  我们的 Poller 和 Signal Monitor 需要长期/定时运行。
+- **解法**：把职责拆成两类，但都用同一个容器镜像、同一套代码：
+  1. **webhook 入口** 是无状态、事件驱动的 → 可以上 serverless（便宜、自动伸缩）。
+  2. **Poller + Signal Monitor** 是常驻/定时的 → 要么放一个 **always-on 容器**（ECS Fargate 常驻 / 一台小 EC2），要么用**外部调度器定时唤醒**（EventBridge cron → 跑一次扫盘任务）。
+- 因为平台无关，**起步最省事**：一个 always-on 容器把全部职责跑起来；等量大了再按上面拆分。AWS 只是"第一个落脚点"，不是绑定。
+
 ---
 
 ## 5. 分阶段路线图（建议一里程碑一 PR）
 
-- **Phase 0 — 服务骨架**：建 `service/` 包、FastAPI app、`/healthz`、把 `value_company` 等包成 tool、本地 `uvicorn` 跑起来。把 `qr` 确认为可被库调用。
-- **Phase 1 — 闭环 MVP（同步、单源、手动喂事件）**：`POST /events/replay` 喂一条"评级下调"假事件 → Agent 分类→取数→重定价→生成信号→落库→**发邮件**。**先把整条链跑通**，不接真实时源。
-- **Phase 2 — 真实时接入**：接 FMP poller（免费起步）/ 真 webhook 源、事件队列、去重、重试、错误隔离。
-- **Phase 3 — 上 AWS**：Docker 化、ECS Fargate + ALB、Postgres(RDS/Supabase)、密钥走 Secrets Manager。
-- **Phase 4 — 信号质量闭环**：用现有 `qr backtest` + `qr ledger track/scorecard` 回测/打分这些自动信号到底有没有 alpha，反哺 `compute_signal` 的阈值。
+- **Phase 0 — 服务骨架**：建 `service/` + `signal_system/` 包、FastAPI app、`/healthz`、把 `value_company` 等包成 tool、连 Supabase、本地 `docker compose` 跑起来。
+- **Phase 1 — 闭环 MVP（同步、单源、手动喂事件）**：`POST /events/replay` 喂一条"评级下调"假事件 → Agent 分类→取数→重定价→`LlmSignalGenerator` 产出含 target/stop/horizon 的信号→落库→**发邮件**。**先把整条链跑通**，不接真实时源。
+- **Phase 2 — 监控回路**：上 `Signal Monitor`，每日扫 open 信号，到目标价/跌破止损/到期 → 通知 + 状态流转。信号生命周期闭环。
+- **Phase 3 — 真实时接入**：接 FMP poller（免费起步）/ 真 webhook 源、事件队列、去重、重试、错误隔离。
+- **Phase 4 — 上 AWS（平台无关镜像）**：先一个 always-on 容器跑全部；密钥走 Secrets Manager。
+- **Phase 5 — 算法信号 + 质量闭环**：积累数据后做 `AlgoSignalGenerator`，用 `qr backtest` + `ledger scorecard` 对比 LLM vs 算法信号的 alpha，反哺阈值。
 
 ---
 
-## 6. 需要你拍板的开放问题
+## 6. 已拍板 / 待拍板
 
+**已拍板：**
+- ✅ 数据库 = **Supabase（Postgres）**，开发+生产统一。
+- ✅ 部署 = **平台无关 Docker 容器**，AWS 作为第一落脚点（起步用单个 always-on 容器）。
+- ✅ 两套体系解耦：估值体系(A) 与 交易信号体系(B) 独立；信号含 target/stop/horizon/direction。
+- ✅ 信号生成器可插拔：现在 `LlmSignalGenerator`，将来 `AlgoSignalGenerator`。
+
+**待拍板：**
 1. **实时数据源**：起步先用现有 FMP（准实时、便宜），还是直接上付费 webhook 源（秒级、贵）？
-2. **Agent 自主度**：信号是**自动落库+通知**（人只在模拟盘手动下单），还是**落库前要你点头**？（我建议 Phase 1 全自动落库，但只通知不下单——人始终在最后一环。）
-3. **仓位大小（suggested_size）**：按什么规则算？固定额度 / 按 conviction 比例 / 按偏离% ？需要一套 position-sizing 规则。
-4. **数据库**：生产用 Supabase（托管、自带面板）还是 AWS RDS（和 ECS 同生态）？
-5. **AWS 形态**：常驻 ECS Fargate（推荐），还是 webhook 走 Lambda + 估值走容器的混合？
+2. **Agent 自主度**：信号**自动落库+通知**（人只手动下单），还是**落库前要你点头**？（建议 Phase 1 自动落库、只通知不下单。）
+3. **仓位大小（suggested_size）**：固定额度 / 按 conviction 比例 / 按到止损的风险（risk-based）？这是 System B 唯一还没定的规则。
+4. **扫盘频率**：Signal Monitor 只收盘后扫一次，还是要盘中（如每 15 分钟）扫止损？盘中更及时但更耗数据配额。
 
 ---
 
