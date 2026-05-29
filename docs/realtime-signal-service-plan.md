@@ -121,7 +121,7 @@
 | `target_price` | **目标价**（如"现价 1600 → 目标 2000"） |
 | `stop_loss` | **止损价** |
 | `horizon` | **持有时间**（如 1 个月、3 个月） |
-| `suggested_size` | 建议仓位（额度规则见 §6 待定项） |
+| `suggested_size` | 建议仓位，用 **risk-based**：`size = 权益 × 风险% / (entry − stop_loss)`，起步风险% = 1%，conviction 当乘数(0.5%–2%)。把 stop_loss 直接用起来，每笔风险固定。 |
 | `generated_by` | `llm` 或 `algo`（见下，可插拔） |
 | `status` | `open / target_hit / stopped_out / expired / closed` |
 
@@ -151,8 +151,15 @@
 
 ### 3.1 Ingestion（实时接入层）
 - **FastAPI** 应用，`POST /webhook/{source}`：校验签名 → 写 `raw_events` → 入队 → 立即 `200`。
-- **Poller**（兜底/免费源）：`asyncio` 定时任务，按 watchlist 轮询 FMP 的
-  `analyst`（评级/目标价调整）和 `news` 端点，diff 出新事件后走同一条队列。
+- **Poller**（主力源 = FMP）：`asyncio` 定时任务，按 watchlist 轮询 FMP 的
+  `analyst/grades`（**评级调整**，字段 `date/gradingCompany/previousGrade/newGrade/action`，
+  实测 NVDA 2 天新鲜）、`analyst/price-target-summary`、`news/stock` 端点。
+  **grades 端点返回全量历史**，所以 poller 要**与上次见过的最新一条 diff** 才算新事件。
+- **能力探测（capability probe）**：服务启动时用真实 key 实打 grades / price-target /
+  stock-news / quote，记录"本 key 能用哪些端点"；运行时任一端点 **402 → 软降级**
+  （沿用现有 `qr` 行为），缺评级就退用新闻+财报，绝不闷崩。
+  > ⚠️ FMP Starter（第二档）**未必包含 analyst grades / price-target**（历来 Premium+）。
+  > 待用户用自己的 key 验证；无论结论如何，probe + 402 降级都让系统优雅适配。
 - 抽象一个 `EventSource` 接口，付费 webhook 源与免费 poll 源产出**统一的内部事件结构**，
   下游不关心来源。
 - **去重**是头等大事：同一事件多源/重推必须只触发一次。
@@ -190,9 +197,13 @@
 - 注意现有测试用内存 SQLite——`DateTime(timezone=True)` 列在测试里仍要 `_naive_utc` 归一。
 
 ### 3.5 Signal Monitor（监控回路，全新）
-- 一个定时任务（每日收盘后必跑，盘中可选），扫 `status=open` 的信号：
-  取最新 quote → 命中 `target_price` / `stop_loss` / `expires_at` 任一条件 → 流转 status + 触发 `notify`。
-- 跌破止损是**最高优先级**，应尽量盘中扫到、第一时间推送。
+- **分层扫盘频率（已定）**：
+  - **收盘后每日 1 次** → 查 `target_hit` / `horizon` 到期（Phase 2 先只做这层）。
+  - **盘中每 30 分钟** → 只查 `stop_loss` 跌破（Phase 3 加）。
+  - 不做 tick/1分钟级（过度设计）。
+- **省配额关键**：用 FMP `batch-quote`，一次调用拿一批 symbol 报价，扫盘成本与 watchlist 大小无关。
+- 取最新 quote → 命中 `target_price` / `stop_loss` / `expires_at` 任一 → 流转 status + 触发 `notify`。
+- 跌破止损是**最高优先级**，盘中 30 分钟那层就是为它。
 - 复用现有 `ledger track` 给每条信号算前向收益，喂回 `scorecard` 打分。
 
 ### 3.6 通知层（全新，最容易）
@@ -273,12 +284,14 @@
 - ✅ 部署 = **平台无关 Docker 容器**，AWS 作为第一落脚点（起步用单个 always-on 容器）。
 - ✅ 两套体系解耦：估值体系(A) 与 交易信号体系(B) 独立；信号含 target/stop/horizon/direction。
 - ✅ 信号生成器可插拔：现在 `LlmSignalGenerator`，将来 `AlgoSignalGenerator`。
+- ✅ **数据源 = FMP（Starter 第二档）**，poll 模式 + 启动能力探测 + 402 软降级。
+  `analyst/grades` 是评级调整主源（待用户验证 Starter 是否含此端点）。
+- ✅ **Agent 自主度 = 自动落库 + 自动通知，下单仍人工**（无人工审批环节）。
+- ✅ **仓位 = risk-based**，起步每笔风险 1%，`size = 权益×1% / (entry − stop)`，conviction 后续叠乘数。
+- ✅ **扫盘频率 = 收盘后每日 + 盘中每 30 分钟查止损**（用 batch-quote 省配额）。
 
-**待拍板：**
-1. **实时数据源**：起步先用现有 FMP（准实时、便宜），还是直接上付费 webhook 源（秒级、贵）？
-2. **Agent 自主度**：信号**自动落库+通知**（人只手动下单），还是**落库前要你点头**？（建议 Phase 1 自动落库、只通知不下单。）
-3. **仓位大小（suggested_size）**：固定额度 / 按 conviction 比例 / 按到止损的风险（risk-based）？这是 System B 唯一还没定的规则。
-4. **扫盘频率**：Signal Monitor 只收盘后扫一次，还是要盘中（如每 15 分钟）扫止损？盘中更及时但更耗数据配额。
+**待用户验证（不阻塞开发）：**
+- ❓ 用 Starter key 实打 `grades` / `news/stock`，确认第二档是否含评级+新闻端点；结论只影响数据源降级策略，不影响架构。
 
 ---
 
