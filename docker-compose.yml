@@ -1,0 +1,13 @@
+# Local run target for qr-service (Issue #53, Phase 0).
+#
+# The database is external (Neon) — its DSN comes from .env via QR_DATABASE_URL —
+# so there is no local Postgres service here, just the one always-on container
+# that (later) runs the webhook intake + poller + Signal Monitor. For Phase 0 it
+# serves /healthz and /value/{symbol}.
+services:
+  qr-service:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
