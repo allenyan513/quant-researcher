@@ -13,6 +13,8 @@ dependencies = [
     "numpy>=1.26",
     "scipy>=1.11",
     "edgartools>=5.31.5",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]

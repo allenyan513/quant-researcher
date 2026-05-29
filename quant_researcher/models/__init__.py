@@ -11,7 +11,9 @@ MA-1: `universe`, `securities`. MA-2: `profiles`, `daily_prices`. MA-3:
 ME: `holdings`, `morning_call_snapshots`, `trades`. MD: `news_items`,
 `research_bundles`. MF: `decisions`, `decision_tracking`. MH:
 `backtest_runs`. MG: `signals`, `signal_runs`. Phase 3: `transcripts`.
-Phase 5: `insider_transactions`, `short_interest`.
+Phase 5: `insider_transactions`, `short_interest`. Issue #53 Phase 0:
+`raw_events`, `trading_signals` (the real-time signal service Event/TradingSignal
+contract — `trading_signals` is distinct from MG's `signals`).
 """
 
 from __future__ import annotations
@@ -26,12 +28,14 @@ from quant_researcher.models.morningcall import MorningCallSnapshot
 from quant_researcher.models.prices import DailyPrice
 from quant_researcher.models.profile import Profile
 from quant_researcher.models.ratios import FinancialRatios
+from quant_researcher.models.raw_events import RawEvent
 from quant_researcher.models.research import NewsItem, ResearchBundle
 from quant_researcher.models.screens import Screen, ScreenRun
 from quant_researcher.models.securities import Security
 from quant_researcher.models.short_interest import ShortInterest
 from quant_researcher.models.signals import Signal, SignalRun
 from quant_researcher.models.trades import Trade
+from quant_researcher.models.trading_signals import TradingSignal
 from quant_researcher.models.transcripts import Transcript
 from quant_researcher.models.universe import UniverseMember
 from quant_researcher.models.valuation import ValuationSnapshot
@@ -51,6 +55,7 @@ __all__ = [
     "MorningCallSnapshot",
     "NewsItem",
     "Profile",
+    "RawEvent",
     "ResearchBundle",
     "Screen",
     "ScreenRun",
@@ -59,6 +64,7 @@ __all__ = [
     "Signal",
     "SignalRun",
     "Trade",
+    "TradingSignal",
     "Transcript",
     "UniverseMember",
     "ValuationSnapshot",
