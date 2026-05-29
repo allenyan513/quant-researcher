@@ -84,7 +84,7 @@
 3. **分类**：Agent 调 `classify_event` —— 这是评级调整？并购？财报超预期？还是宏观噪声（直接丢弃）？提取出 `symbol`、`event_type`、`direction`、关键数字（新目标价/收购价等）。
 4. **取数**：Agent 调 `refresh_data --symbols X`（只刷该票的 quote/ratios/estimates），保证估值输入新鲜。
 5. **重定价**：Agent 调 `value_company`。**关键：单纯重跑不会变**，因为 DCF 输入是季报数据。所以 Agent 要**读懂新闻、调整假设**（如：被收购→以收购价为锚；评级下调→下调增长率假设），再跑 `value`/`research_bundle` 拿到新的公允价值区间。
-6. **生成信号**：Agent 调 `compute_signal`——这是**交易体系**(System B，见 §1.5)在干活。它把估值体系(System A)的公允价值当作**输入之一**，再结合现价偏离、事件方向、置信度，产出一条完整的量化信号：`{direction, conviction, entry_price, target_price, stop_loss, horizon, suggested_size}`。
+6. **生成信号**：Agent 调 `compute_signal`——这是**交易体系**(System B，见 §1.5)在干活。它把估值体系(System A)的公允价值当作**输入之一**，再结合现价偏离、事件方向、置信度，产出一条完整的量化信号：`{direction, entry_price, target_price, stop_loss, horizon}`（+ conviction 作强度标注）。
 7. **落库**：调 `record_decision`（已自动 snapshot 当时数据，可回放）+ 写 `signals` 表（含 target/stop/horizon/status=open）。
 8. **通知**：调 `notify` 把信号摘要发到邮箱/手机。
 9. 操作者在自己的模拟盘**手动**下单（人始终在环里）。
@@ -121,9 +121,12 @@
 | `target_price` | **目标价**（如"现价 1600 → 目标 2000"） |
 | `stop_loss` | **止损价** |
 | `horizon` | **持有时间**（如 1 个月、3 个月） |
-| `suggested_size` | 建议仓位，用 **risk-based**：`size = 权益 × 风险% / (entry − stop_loss)`，起步风险% = 1%，conviction 当乘数(0.5%–2%)。把 stop_loss 直接用起来，每笔风险固定。 |
 | `generated_by` | `llm` 或 `algo`（见下，可插拔） |
 | `status` | `open / target_hit / stopped_out / expired / closed` |
+
+> **仓位大小（position sizing）刻意不做**——信号只负责"方向 + 目标价 + 止损价 + 持有时间"
+> 这四个核心要素，具体下多少由你在模拟盘自行决定。`conviction` 仅作信号强度/通知优先级标注，
+> 不参与任何算仓位逻辑。
 
 ### 信号生成器可插拔（现在 LLM，将来算法）
 
@@ -190,7 +193,7 @@
 - 新表 `raw_events`（原始消息+去重键）、`signals`（结构化交易信号）。
 - `signals` 字段（对齐 §1.5 的量化信号要素）：
   `id, event_id, symbol, direction(buy/sell/hold), conviction, entry_price,
-  target_price, stop_loss, horizon_days, suggested_size,
+  target_price, stop_loss, horizon_days,
   fair_value_base（来自 System A，可空）, deviation_pct, thesis,
   generated_by(llm/algo), snapshot_id, created_at, expires_at, status`。
 - **DB 定 Neon（serverless Postgres）**，开发+生产统一，省一次 SQLite→PG 的迁移。Neon scale-to-zero、按用量计费，且是标准 PG wire protocol，现有 SQLAlchemy/psycopg 直接连。Schema 走现有 `db.py` 的 Base + Alembic/SQL 迁移。注意 serverless DB 可能 cold-start（首查有几百 ms 延迟）+ 连接走 pooler（`?sslmode=require`、用 pooled endpoint）。
@@ -287,7 +290,7 @@
 - ✅ **数据源 = FMP（Starter 第二档）**，poll 模式 + 启动能力探测 + 402 软降级。
   `analyst/grades` 是评级调整主源（待用户验证 Starter 是否含此端点）。
 - ✅ **Agent 自主度 = 自动落库 + 自动通知，下单仍人工**（无人工审批环节）。
-- ✅ **仓位 = risk-based**，起步每笔风险 1%，`size = 权益×1% / (entry − stop)`，conviction 后续叠乘数。
+- ✅ **不做仓位大小**：信号只含方向/目标价/止损价/持有时间四要素，下多少由用户在模拟盘自定。
 - ✅ **扫盘频率 = 收盘后每日 + 盘中每 30 分钟查止损**（用 batch-quote 省配额）。
 
 **待用户验证（不阻塞开发）：**
